@@ -30,6 +30,7 @@
 | P10 | Локальная LLM и локальные embeddings | П | `local-llm`, `local-rag-embeddings` |
 | P11 | Тонкий web-фронтенд | M | `web-ui` |
 | P12 | Паритет, документация, полировка | П | — |
+| P4.5 | Реранкинг кандидатов документации | M | `docs-reranking` (MODIFIED `docs-retrieval`) |
 
 ## P0. Каркас, фасад сессии, пакет домена (M) — закрыта
 

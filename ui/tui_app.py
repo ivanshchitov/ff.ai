@@ -45,6 +45,7 @@ PHASE_LABELS = {
     RequestPhase.FACTS_UPDATE: "Обновление фактов...",
     RequestPhase.MCP_CONNECT: "Подключение к MCP-серверам...",
     RequestPhase.MCP_TOOL: "Вызов инструмента...",
+    RequestPhase.DOCS_RERANK: "Отбор фрагментов документации...",
 }
 FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
@@ -272,6 +273,17 @@ class DevAssistantTUI:
         elif status == "no_candidates":
             self.console.print(
                 "[dim]📚 В документации портала по этому вопросу ничего не найдено.[/dim]"
+            )
+        elif status == "no_matches":
+            found = len(getattr(report, "candidates", ()) or ())
+            self.console.print(
+                f"[dim]📚 Найдено кандидатов: {found}, но ни один не прошёл порог "
+                f"{self.session.docs_threshold:.2f} — отвечаю без документации.[/dim]"
+            )
+        elif status == "rerank_failed":
+            reason = escape(str(getattr(report, "error", "") or "причина неизвестна"))
+            self.console.print(
+                f"[bold yellow]📚 Оценка фрагментов не удалась: {reason}[/bold yellow]"
             )
         check = self.session.last_citations
         if check is None:

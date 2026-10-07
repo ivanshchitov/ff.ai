@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from . import config
+from . import config, docs_reranking
 from .domains import DomainDocs
 from .mcp_registry import MCPServerSpec
 
@@ -29,6 +29,8 @@ from .mcp_registry import MCPServerSpec
 # вызывающий, когда режим выключен: при выключенном режиме сюда не обращаются вовсе.
 STATUS_OK = "ok"
 STATUS_NO_CANDIDATES = "no_candidates"
+STATUS_NO_MATCHES = "no_matches"
+STATUS_RERANK_FAILED = "rerank_failed"
 STATUS_UNAVAILABLE = "unavailable"
 STATUS_DISABLED = "disabled"
 
@@ -56,6 +58,9 @@ class DocsCandidate:
     section: str
     url: str = ""
     snippet: str = ""
+    # Оценка второй ступени: 0.0 означает «не оценивался» (режим baseline), а не «оценён в ноль».
+    score: float = 0.0
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,9 @@ class DocsReport:
     fragments: Tuple[DocsFragment, ...] = ()
     error: str = ""
     sdk_version: str = ""
+    # Прошла ли вторая ступень: нужна отчёту, чтобы отличить «не оценивали» от «оценили и отсеяли».
+    rated: bool = False
+    threshold: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -162,12 +170,22 @@ class DocsRetriever:
         self._cached_latest = ""
         return self.versions
 
-    def search(self, question: str) -> DocsReport:
+    def search(
+        self,
+        question: str,
+        *,
+        rate: Optional[Callable[[str, Sequence[DocsCandidate]], Any]] = None,
+        threshold: Optional[float] = None,
+    ) -> DocsReport:
         """Ищет по документации запросом из вопроса и приносит фрагменты верхних документов.
 
-        Ни один сбой не поднимается наружу: непонятный ответ, отказ инструмента и недоступный
-        сервер — это состояния снимка. Фрагменты строятся из полного текста документа, а если
-        он не получен — из сниппетов поиска.
+        Ни один сбой не поднимается наружу: непонятный ответ, отказ инструмента, недоступный
+        сервер и негодная оценка кандидатов — это состояния снимка. Фрагменты строятся из полного
+        текста документа, а если он не получен — из сниппетов поиска.
+
+        `rate` — вторая ступень отбора: поиск делает приложение, а оценку кандидатов — модель
+        сессии, поэтому она приходит функцией. Без неё (или в режиме baseline) доставляются все
+        найденные кандидаты, как до появления ступени.
         """
         sections = self._sections(question)
         version = self.version
@@ -180,7 +198,44 @@ class DocsRetriever:
                 candidates = self._collect(question, sections, version)
                 if not candidates:
                     return self._report(question, sections, version, STATUS_NO_CANDIDATES)
-                fragments = self._fragments(question, candidates, version)
+                if rate is None:
+                    fragments = self._fragments(question, candidates, version)
+                else:
+                    limit = float(config.DOCS_RELEVANCE_THRESHOLD if threshold is None else threshold)
+                    marked, selected = self._rate(question, candidates, rate, limit)
+                    if selected is None:
+                        return self._report(
+                            question,
+                            sections,
+                            version,
+                            STATUS_RERANK_FAILED,
+                            candidates=marked,
+                            error=self.rerank_error(),
+                            rated=True,
+                            threshold=limit,
+                        )
+                    if selected.empty:
+                        return self._report(
+                            question,
+                            sections,
+                            version,
+                            STATUS_NO_MATCHES,
+                            candidates=marked,
+                            rated=True,
+                            threshold=limit,
+                        )
+                    candidates = selected.kept
+                    fragments = self._fragments(question, candidates, version)
+                    return self._report(
+                        question,
+                        sections,
+                        version,
+                        STATUS_OK,
+                        candidates=marked,
+                        fragments=fragments,
+                        rated=True,
+                        threshold=limit,
+                    )
         except _Unavailable as failure:
             return self._report(question, sections, version, STATUS_UNAVAILABLE, error=failure.reason)
         except Exception as error:  # noqa: BLE001 - снимок обязан пережить любую ошибку разбора
@@ -190,6 +245,35 @@ class DocsRetriever:
         )
 
     # --- разделы, версия ------------------------------------------------------------------
+
+    def _rate(
+        self,
+        question: str,
+        candidates: Tuple[DocsCandidate, ...],
+        rate: Callable[[str, Sequence[DocsCandidate]], Any],
+        threshold: float,
+    ) -> Tuple[Tuple[DocsCandidate, ...], Any]:
+        """Оценивает кандидатов и отбирает прошедших порог.
+
+        Негодная оценка — не исключение наружу, а признак того, что отбор не состоялся: вторая
+        ступень существует ради качества, и «доставим что было» её обесценивает.
+        """
+        try:
+            ratings = rate(question, candidates)
+        except Exception as error:  # noqa: BLE001 - причину показываем пользователю текстом
+            self._last_rerank_error = _reason(error)
+            return candidates, None
+        try:
+            parsed = docs_reranking.parse_response(str(ratings or ""), candidates)
+            marked = docs_reranking.mark(candidates, parsed)
+            return marked, docs_reranking.select(marked, parsed, threshold)
+        except Exception as error:  # noqa: BLE001 - негодный ответ оценщика тоже состояние
+            self._last_rerank_error = _reason(error)
+            return candidates, None
+
+    def rerank_error(self) -> str:
+        """Причина последней неудавшейся оценки, если она была."""
+        return getattr(self, "_last_rerank_error", "")
 
     def _sections(self, question: str) -> Tuple[str, ...]:
         """Разделы поиска: основной и, для вопроса о версии, примечания к выпуску.
@@ -372,6 +456,8 @@ class DocsRetriever:
         candidates: Tuple[DocsCandidate, ...] = (),
         fragments: Tuple[DocsFragment, ...] = (),
         error: str = "",
+        rated: bool = False,
+        threshold: float = 0.0,
     ) -> DocsReport:
         return DocsReport(
             query=question,
@@ -382,6 +468,8 @@ class DocsRetriever:
             fragments=tuple(fragments),
             error=error,
             sdk_version=self.sdk_version,
+            rated=rated,
+            threshold=threshold,
         )
 
 

@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import citations, config, context_compressor, context_strategies, prompts
+from . import citations, config, context_compressor, context_strategies, docs_reranking, prompts
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
 from .domains import Domain
@@ -33,6 +33,7 @@ class RequestPhase(Enum):
     FACTS_UPDATE = "facts_update"
     MCP_CONNECT = "mcp_connect"
     MCP_TOOL = "mcp_tool"
+    DOCS_RERANK = "docs_rerank"
 
 
 @dataclass
@@ -79,6 +80,9 @@ class AgentConfig:
     # Поиск по документации портала — решение сессии (как модель и настройки ответа): выключенный
     # режим не делает ни одного обращения к серверу и не добавляет ни одного сообщения.
     docs_enabled: bool = True
+    # Режим отбора кандидатов документации: enhanced оценивает их моделью, baseline — нет.
+    docs_retrieval: str = config.DOCS_RETRIEVAL_MODE
+    docs_threshold: float = config.DOCS_RELEVANCE_THRESHOLD
 
     @property
     def format(self):
@@ -200,7 +204,7 @@ class RepoAgent:
         не отменяет — он уходит с прежним блоком фактов.
         """
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
-        self._retrieve_docs(question)
+        self._retrieve_docs(question, on_phase)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
@@ -212,7 +216,7 @@ class RepoAgent:
 
     # --- документация портала и проверка ссылок -------------------------------------------
 
-    def _retrieve_docs(self, question: str) -> None:
+    def _retrieve_docs(self, question: str, on_phase=None) -> None:
         """Ищет фрагменты документации перед вопросом; сбой поиска вопрос не отменяет.
 
         Поиск идёт до сборки запроса: найденное — данные именно этого вопроса. Выключенный режим
@@ -223,10 +227,31 @@ class RepoAgent:
         if not self.config.docs_enabled or self.docs_retriever is None:
             self._last_docs_report = None
             return
+        rate = None
+        if self.config.docs_retrieval == docs_reranking.MODE_ENHANCED:
+            rate = lambda text, candidates: self._rate_candidates(text, candidates, on_phase)
         # Версия документации — свойство ретривера: её задаёт пользователь командой, а в снимок
         # она попадает так, как её выбрал сервер или пользователь.
-        self._last_docs_report = self.docs_retriever.search(question)
+        self._last_docs_report = self.docs_retriever.search(
+            question, rate=rate, threshold=self.config.docs_threshold
+        )
         self._docs_fragments = tuple(getattr(self._last_docs_report, "fragments", ()) or ())
+
+    def _rate_candidates(self, question: str, candidates, on_phase=None) -> str:
+        """Оценка кандидатов моделью сессии: вспомогательный запрос, как у стратегий.
+
+        Расход учитывается в общей сессии, а снимок «последнего запроса» остаётся за ответом:
+        пользователю в метриках нужен ответ, а не служебная оценка.
+        """
+        self._signal(on_phase, RequestPhase.DOCS_RERANK)
+        meta = self.client.ask_with_usage_messages(
+            docs_reranking.build_messages(question, candidates),
+            max_tokens=config.max_tokens_for_words(config.DOCS_RERANK_MAX_WORDS),
+            temperature=None,
+            model=self.config.model,
+        )
+        self._ledger.record(meta)
+        return meta.content
 
     def docs_report(self) -> Optional[object]:
         """Снимок последнего поиска: что искали, где, в какой версии, что доставили."""

@@ -12,6 +12,7 @@ import pytest
 from tests.fake_docs_server import MARKERS
 
 from .harness import AppSession
+from .stub_api import StubAPI, answer
 
 pytestmark = pytest.mark.e2e
 
@@ -28,6 +29,37 @@ CITED = (
     f"Цитата: «{MARKERS[POSITIONING]}»\n"
     f"Источник: {POSITIONING}"
 )
+
+
+def _model_double(stub: StubAPI, *, answer_text: str, score: float = 0.9, rerank: str = None):
+    """Заглушка модели для корпуса документации: на оценку кандидатов — JSON, на вопрос — ответ.
+
+    Число и идентификаторы кандидатов знает только приложение, поэтому ответ на запрос оценки
+    вычисляется по телу запроса, а не задаётся заранее.
+    """
+    if rerank is None:
+
+        def rerank(payload):
+            data = json.loads(payload["messages"][-1]["content"].split("\n", 1)[1])
+            return answer(
+                json.dumps(
+                    {
+                        "results": [
+                            {"id": item["id"], "score": score, "reason": "тестовая оценка"}
+                            for item in data["candidates"]
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    def builder(payload):
+        system = payload["messages"][0]["content"]
+        if "оцениваешь" in system:
+            return rerank(payload)
+        return answer(answer_text)
+
+    return stub.dynamic(builder)
 
 
 def _launch(tmp_path: Path, stub, **kwargs) -> AppSession:
@@ -47,11 +79,12 @@ def _launch(tmp_path: Path, stub, **kwargs) -> AppSession:
 def test_cited_answer_is_accepted_with_sources_line(stub, tmp_path: Path):
     from .stub_api import answer
 
-    stub.always(answer(CITED))
+    _model_double(stub, answer_text=CITED)
     session = _launch(tmp_path, stub)
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 1, "подтверждённый ответ не требует повтора"
+        assert stub.call_count == 2, "оценка кандидатов и ответ"
+        assert client_answer_calls(stub) == 1, "подтверждённый ответ не требует повтора"
         screen = session.screen_text()
         assert "📚 Источники (документация 5.2.1)" in screen
         assert POSITIONING in screen
@@ -67,11 +100,11 @@ def test_cited_answer_is_accepted_with_sources_line(stub, tmp_path: Path):
 def test_uncited_answer_is_retried_then_replaced(stub, tmp_path: Path):
     from .stub_api import answer
 
-    stub.sequence(answer(UNCITED), answer("Тот же ответ без ссылки и без цитаты."))
+    _model_double(stub, answer_text=UNCITED)
     session = _launch(tmp_path, stub)
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 2, "нарушение стоит одного повтора"
+        assert client_answer_calls(stub) == 2, "нарушение стоит одного повтора"
         screen = session.screen_text()
         assert "📚 Ссылки не подтверждены" in screen
         assert "Не знаю:" in screen
@@ -86,13 +119,13 @@ def test_uncited_answer_is_retried_then_replaced(stub, tmp_path: Path):
 def test_disabled_mode_removes_search_and_check(stub, tmp_path: Path):
     from .stub_api import answer
 
-    stub.always(answer(UNCITED))
+    _model_double(stub, answer_text=UNCITED)
     session = _launch(tmp_path, stub)
     try:
         session.send_line("/docs mode off")
         session.wait_for("Поиск по документации выключен")
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 1, "без проверки повтора быть не должно"
+        assert stub.call_count == 1, "без корпуса нет ни оценки, ни повтора"
         assert UNCITED[:40] in session.screen_text()
         payload = json.dumps(stub.last_payload(), ensure_ascii=False)
         assert "Ниже — фрагменты" not in payload
@@ -105,7 +138,7 @@ def test_unavailable_docs_server_is_reported_and_the_answer_goes_through(stub, t
     """Сервер документации, который не поднимается: приложение говорит об этом и отвечает дальше."""
     from .stub_api import answer
 
-    stub.always(answer(UNCITED))
+    _model_double(stub, answer_text=UNCITED)
     session = AppSession(
         history_file=tmp_path / "state" / "history.json",
         state_dir=tmp_path / "state",
@@ -132,7 +165,7 @@ def test_version_question_searches_release_notes(stub, tmp_path: Path):
         f"Цитата: «{MARKERS[RELEASE_NOTES]}»\n"
         f"Источник: {RELEASE_NOTES}"
     )
-    stub.always(answer(cited))
+    _model_double(stub, answer_text=cited)
     session = _launch(tmp_path, stub)
     try:
         session.ask("в какой версии появился фоновый режим геопозиции?", timeout=DOCS_TIMEOUT)
@@ -147,7 +180,7 @@ def test_version_question_searches_release_notes(stub, tmp_path: Path):
 def test_docs_report_shows_fragments_without_model_requests(stub, tmp_path: Path):
     from .stub_api import answer
 
-    stub.always(answer(CITED))
+    _model_double(stub, answer_text=CITED)
     session = _launch(tmp_path, stub)
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
@@ -164,7 +197,7 @@ def test_docs_report_shows_fragments_without_model_requests(stub, tmp_path: Path
 def test_fragment_block_stays_out_of_history(stub, tmp_path: Path):
     from .stub_api import answer
 
-    stub.always(answer(CITED))
+    _model_double(stub, answer_text=CITED)
     session = _launch(tmp_path, stub)
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
@@ -172,5 +205,68 @@ def test_fragment_block_stays_out_of_history(stub, tmp_path: Path):
         assert "Ниже — фрагменты" not in raw
         assert "📚" not in raw
         assert QUESTION in raw
+    finally:
+        session.close()
+
+
+def client_answer_calls(stub: StubAPI) -> int:
+    """Сколько запросов было к модели за ответом, без служебного запроса оценки."""
+    return sum(
+        1
+        for request in stub.requests
+        if "оцениваешь" not in request["payload"]["messages"][0]["content"]
+    )
+
+
+def test_low_scores_give_no_fragments_and_a_journal_line(stub, tmp_path: Path):
+    """Все кандидаты ниже порога: документация не доставляется, ответ всё равно формируется."""
+    _model_double(stub, answer_text="В документации портала подходящего ответа нет.", score=0.1)
+    session = _launch(tmp_path, stub)
+    try:
+        session.ask(QUESTION, timeout=DOCS_TIMEOUT)
+        screen = session.screen_text()
+        assert "ни один не прошёл порог" in screen
+        payload = json.dumps(stub.last_payload(), ensure_ascii=False)
+        assert "Ниже — фрагменты" not in payload, "фрагменты не доставляются"
+        assert "не признан относящимся" in payload, "модель получает инструкцию"
+    finally:
+        session.close()
+
+
+def test_bad_rating_response_is_a_visible_state(stub, tmp_path: Path):
+    """Негодный ответ оценщика: видимая причина и ответ без документации."""
+    _model_double(stub, answer_text="Отвечаю без документации.", rerank=lambda payload: answer("не JSON"))
+    session = _launch(tmp_path, stub)
+    try:
+        session.ask(QUESTION, timeout=DOCS_TIMEOUT)
+        assert "Оценка фрагментов не удалась" in session.screen_text()
+    finally:
+        session.close()
+
+
+def test_baseline_mode_skips_the_rating_request(stub, tmp_path: Path):
+    _model_double(stub, answer_text=CITED)
+    session = _launch(tmp_path, stub)
+    try:
+        session.send_line("/docs retrieval baseline")
+        session.wait_for("Режим отбора: baseline")
+        session.ask(QUESTION, timeout=DOCS_TIMEOUT)
+        assert stub.call_count == 1, "в baseline оценка не запрашивается"
+        assert session.contains("Режим отбора: baseline"), "отчёт показывает режим"
+    finally:
+        session.close()
+
+
+def test_threshold_command_changes_the_report(stub, tmp_path: Path):
+    _model_double(stub, answer_text=CITED)
+    session = _launch(tmp_path, stub)
+    try:
+        session.send_line("/docs threshold 0.9")
+        session.wait_for("Порог отбора: 0.90")
+        session.send_line("/docs")
+        assert "порог: 0.90" in session.wait_for("Режим отбора:")
+
+        session.send_line("/docs threshold 5")
+        assert "от 0 до 1" in session.wait_for("от 0 до 1")
     finally:
         session.close()

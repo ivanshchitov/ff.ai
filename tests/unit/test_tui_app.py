@@ -14,15 +14,30 @@ from core.api_client import AnswerMeta
 from core.history_manager import HistoryManager
 from core.session import AssistantSession
 from ui.tui_app import DevAssistantTUI
+from tests.conftest import rerank_answer
 
 
 class FakeClient:
-    def __init__(self, answer: str = "Модель инициализируется в src/models.cpp.") -> None:
+    def __init__(
+        self, answer: str = "Модель инициализируется в src/models.cpp.", rerank_score: float = 0.9
+    ) -> None:
         self.answer = answer
         self.calls: List[dict] = []
+        self.rerank_score = rerank_score
 
     def ask_with_usage_messages(self, messages, max_tokens=None, temperature=None, model=None):
         self.calls.append({"messages": messages, "model": model})
+        rated = rerank_answer(messages, self.rerank_score)
+        if rated is not None:
+            return AnswerMeta(
+                content=rated,
+                model=model,
+                elapsed_seconds=0.1,
+                prompt_tokens=5,
+                completion_tokens=3,
+                total_tokens=8,
+                cost_usd=0.00001,
+            )
         return AnswerMeta(
             content=self.answer,
             model=model,
@@ -212,3 +227,25 @@ def test_docs_journal_reports_empty_search(tui, recording_console, docs_retrieve
     tui.session._agent.docs_retriever = docs_retriever
     tui._ask("вопрос")
     assert recording_console.contains("ничего не найдено")
+
+
+def test_journal_reports_low_relevance_and_failed_rating(tui, recording_console, docs_retriever):
+    from tests.conftest import FakeCandidate, FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(
+        query="вопрос",
+        status="no_matches",
+        candidates=(FakeCandidate(path="doc/one"),),
+        rated=True,
+    )
+    tui.session._agent.docs_retriever = docs_retriever
+    tui._ask("вопрос")
+    assert recording_console.contains("ни один не прошёл порог 0.60")
+
+    recording_console.buffer.truncate(0)
+    recording_console.buffer.seek(0)
+    docs_retriever.report = FakeDocsReport(
+        query="вопрос", status="rerank_failed", error="ответ оценщика не разобран"
+    )
+    tui._ask("вопрос")
+    assert recording_console.contains("Оценка фрагментов не удалась: ответ оценщика не разобран")

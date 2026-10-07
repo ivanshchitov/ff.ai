@@ -5,6 +5,8 @@
 по данным сервера и что из документа действительно вырезается фрагмент, пригодный для цитаты.
 """
 
+import json
+
 import pytest
 
 from core import config, domains
@@ -75,3 +77,38 @@ def test_absent_question_does_not_produce_fragments(retriever: DocsRetriever):
     assert report.status in (STATUS_OK, STATUS_NO_CANDIDATES), report.error
     if report.status == STATUS_NO_CANDIDATES:
         assert report.fragments == ()
+
+
+def test_rating_separates_relevant_fragments_from_noise(retriever: DocsRetriever):
+    """Вторая ступень на живом портале: слабые кандидаты отсеиваются, сильные остаются.
+
+    Оценку здесь даёт не модель, а сам тест — так проверяется алгоритм отбора на настоящих
+    данных поиска: если оценщик поставит ноль всем, доставки не будет, а при высокой оценке
+    первого кандидата достанется только он.
+    """
+    base = retriever.search(QUESTION)
+    assert base.status == STATUS_OK, base.error
+    candidates = base.candidates
+    assert candidates, "по вопросу о геопозиции поиск обязан вернуть кандидатов"
+
+    ratings = [
+        {"id": index, "score": 0.9 if index == 1 else 0.05, "reason": "тестовая оценка"}
+        for index in range(1, len(candidates) + 1)
+    ]
+    rated = retriever.search(QUESTION, rate=lambda q, c: json.dumps({"results": ratings}), threshold=0.6)
+    assert rated.status == STATUS_OK, rated.error
+    assert len(rated.fragments) == 1, "порог оставляет только первого кандидата"
+    assert rated.candidates[0].score == 0.9
+    assert rated.fragments[0].identifier == base.fragments[0].identifier
+
+
+def test_all_low_scores_give_no_fragments(retriever: DocsRetriever):
+    base = retriever.search(QUESTION)
+    candidates = base.candidates
+    ratings = [
+        {"id": index, "score": 0.1, "reason": "тестовая оценка"}
+        for index in range(1, len(candidates) + 1)
+    ]
+    rated = retriever.search(QUESTION, rate=lambda q, c: json.dumps({"results": ratings}), threshold=0.6)
+    assert rated.status == "no_matches"
+    assert rated.fragments == ()

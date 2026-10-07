@@ -239,6 +239,33 @@ class FakeMCPFactory:
         return [call for client in self.clients for call in client.calls]
 
 
+def rerank_answer(messages, score: float = 0.9) -> str:
+    """Ответ на вспомогательный запрос оценки кандидатов; None — если это не он.
+
+    Заглушки моделей должны уметь отвечать на вторую ступень: иначе проверка оценок падала бы
+    на негодном ответе, и тесты о доставке фрагментов мерили бы не то, что собирались.
+    """
+    import json
+
+    system = messages[0]["content"] if messages else ""
+    if "оцениваешь" not in system:
+        return None
+    try:
+        payload = json.loads(messages[-1]["content"].split("\n", 1)[1])
+        candidates = payload["candidates"]
+    except (KeyError, ValueError):
+        return None
+    return json.dumps(
+        {
+            "results": [
+                {"id": item["id"], "score": score, "reason": "тестовая оценка"}
+                for item in candidates
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
 @pytest.fixture
 def mcp_factory():
     return FakeMCPFactory()
@@ -257,6 +284,19 @@ class FakeFragment:
 
 
 @dataclass(frozen=True)
+class FakeCandidate:
+    """Кандидат поиска для проверок: те же поля, что у настоящего, плюс место для оценки."""
+
+    path: str
+    title: str = "Документ"
+    section: str = "docs"
+    url: str = ""
+    snippet: str = "сниппет"
+    score: float = 0.0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class FakeDocsReport:
     """Снимок поиска по документации: поля совпадают с настоящим отчётом."""
 
@@ -268,6 +308,8 @@ class FakeDocsReport:
     fragments: tuple = ()
     error: str = ""
     sdk_version: str = ""
+    rated: bool = False
+    threshold: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -280,11 +322,17 @@ class FakeDocsRetriever:
     def __init__(self, report: FakeDocsReport = None) -> None:
         self.report = report if report is not None else FakeDocsReport(query="вопрос")
         self.queries = []
+        self.rated = []
+        self.thresholds = []
         self.version = ""
         self.refreshes = 0
 
-    def search(self, question: str):
+    def search(self, question: str, *, rate=None, threshold=None):
+        """Запоминает запрос и, если передана функция оценки, зовёт её — как настоящий ретривер."""
         self.queries.append((question, self.version))
+        self.thresholds.append(threshold)
+        if rate is not None and self.report.candidates:
+            self.rated.append(rate(question, self.report.candidates))
         return self.report
 
     def refresh_versions(self):

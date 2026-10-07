@@ -72,6 +72,9 @@ class StubAPI:
         self.requests: List[Dict[str, Any]] = []
         self._replies: List[Reply] = []
         self._default = answer("Ответ stub-сервера.")
+        # Вычисляемый ответ: нужен там, где ответ зависит от запроса — например, на запрос оценки
+        # кандидатов документации, где число и идентификаторы кандидатов знает только приложение.
+        self._dynamic = None
         self._lock = threading.Lock()
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -80,6 +83,11 @@ class StubAPI:
 
     def always(self, reply: Reply) -> "StubAPI":
         self._default = reply
+        return self
+
+    def dynamic(self, builder) -> "StubAPI":
+        """Ответ, вычисляемый по телу запроса: `builder(payload) -> Reply`."""
+        self._dynamic = builder
         return self
 
     def sequence(self, *replies: Reply) -> "StubAPI":
@@ -119,7 +127,9 @@ class StubAPI:
 
     # --- жизненный цикл ---
 
-    def _next_reply(self) -> Reply:
+    def _next_reply(self, payload: Optional[Dict[str, Any]] = None) -> Reply:
+        if self._dynamic is not None:
+            return self._dynamic(payload or {})
         with self._lock:
             if self._replies:
                 return self._replies.pop(0)
@@ -132,14 +142,15 @@ class StubAPI:
             def do_POST(self):  # noqa: N802 - имя задано базовым классом
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length)
+                payload = json.loads(raw.decode("utf-8"))
                 stub.requests.append(
                     {
                         "path": self.path,
                         "headers": dict(self.headers),
-                        "payload": json.loads(raw.decode("utf-8")),
+                        "payload": payload,
                     }
                 )
-                reply = stub._next_reply()
+                reply = stub._next_reply(payload)
                 if reply.delay:
                     time.sleep(reply.delay)
                 body = reply.body().encode("utf-8")

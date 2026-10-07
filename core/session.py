@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import config, domains, mcp_registry
+from . import config, docs_reranking, domains, mcp_registry
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
@@ -353,15 +353,28 @@ class AssistantSession:
     def docs_enabled(self) -> bool:
         return self._agent.config.docs_enabled
 
+    @property
+    def docs_retrieval(self) -> str:
+        return self._agent.config.docs_retrieval
+
+    @property
+    def docs_threshold(self) -> float:
+        return self._agent.config.docs_threshold
+
     def docs_lines(self) -> Tuple[str, ...]:
         """Отчёт о поиске по документации: запрос, разделы, версия, доставленные фрагменты."""
         if not self.docs_enabled:
             return ("Поиск по документации выключен (/docs mode on — включить).",)
+        settings = f"Режим отбора: {self.docs_retrieval}; порог: {self.docs_threshold:.2f}"
         report = self.docs_report()
         if report is None:
-            return ("Поиска ещё не было: он выполняется перед каждым вопросом.",)
+            return (
+                settings,
+                "Поиска ещё не было: он выполняется перед каждым вопросом.",
+            )
         lines = [
             f"Запрос: {getattr(report, 'query', '')}",
+            settings,
             f"Разделы: {', '.join(getattr(report, 'sections', ()) or ()) or 'н/д'}; "
             f"версия документации: {getattr(report, 'version', '') or 'н/д'}"
             + (
@@ -374,11 +387,19 @@ class AssistantSession:
         ]
         candidates = getattr(report, "candidates", ()) or ()
         if candidates:
-            lines.append(f"Найдено кандидатов: {len(candidates)}")
+            rated = bool(getattr(report, "rated", False))
+            lines.append(
+                f"Найдено кандидатов: {len(candidates)}"
+                + (" (оценены)" if rated else " (оценка не выполнялась)")
+            )
             for candidate in candidates[:5]:
+                score = float(getattr(candidate, "score", 0.0) or 0.0)
+                reason = str(getattr(candidate, "reason", "") or "")
+                mark = f"{score:.2f} — " if rated else ""
+                tail = f": {reason}" if reason else ""
                 lines.append(
-                    f"    {getattr(candidate, 'path', '')} — {getattr(candidate, 'title', '')} "
-                    f"({getattr(candidate, 'section', '')})"
+                    f"    {mark}{getattr(candidate, 'path', '')} — "
+                    f"{getattr(candidate, 'title', '')} ({getattr(candidate, 'section', '')}){tail}"
                 )
         fragments = getattr(report, "fragments", ()) or ()
         lines.append(f"Доставлено фрагментов: {len(fragments)}")
@@ -391,8 +412,42 @@ class AssistantSession:
         return tuple(lines)
 
     def _docs_command(self, argument: str) -> CommandResult:
-        """`/docs` — отчёт, `/docs mode on|off`, `/docs version <версия>`, `/docs trace`."""
+        """`/docs` — отчёт, `mode on|off`, `version <версия>`, `retrieval`, `threshold`, `trace`.
+
+        `trace` — тот же отчёт: подробный вывод уже включает кандидатов, их оценки и причины.
+        """
         argument = argument.strip()
+        if argument.startswith("retrieval"):
+            value = argument[len("retrieval") :].strip().lower()
+            if value not in docs_reranking.MODES:
+                return CommandResult(
+                    command="/docs",
+                    lines=(f"Форма: /docs retrieval {'|'.join(docs_reranking.MODES)}",),
+                )
+            self._agent.config.docs_retrieval = value
+            note = (
+                "кандидаты оцениваются моделью"
+                if value == docs_reranking.MODE_ENHANCED
+                else "кандидаты доставляются без оценки"
+            )
+            return CommandResult(
+                command="/docs", lines=(f"Режим отбора: {value} — {note}.",) + self.docs_lines()
+            )
+        if argument.startswith("threshold"):
+            value = argument[len("threshold") :].strip().replace(",", ".")
+            try:
+                parsed = float(value)
+            except ValueError:
+                return CommandResult(
+                    command="/docs", lines=("Форма: /docs threshold <число от 0 до 1>",)
+                )
+            if not 0.0 <= parsed <= 1.0:
+                return CommandResult(
+                    command="/docs",
+                    lines=(f"Порог должен быть от 0 до 1, а не {parsed}.",),
+                )
+            self._agent.config.docs_threshold = parsed
+            return CommandResult(command="/docs", lines=(f"Порог отбора: {parsed:.2f}.",))
         if argument.startswith("mode"):
             value = argument[len("mode") :].strip().lower()
             if value not in ("on", "off"):

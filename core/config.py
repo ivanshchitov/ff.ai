@@ -210,6 +210,11 @@ DOCS_SEARCH_LIMIT = int(os.getenv("FFAI_DOCS_SEARCH_LIMIT", "5"))
 DOCS_MAX_FRAGMENTS = int(os.getenv("FFAI_DOCS_MAX_FRAGMENTS", "3"))
 DOCS_FRAGMENT_CHARS = int(os.getenv("FFAI_DOCS_FRAGMENT_CHARS", "1500"))
 DOCS_SNIPPET_CHARS = int(os.getenv("FFAI_DOCS_SNIPPET_CHARS", "400"))
+# Вторая ступень отбора: режим (оценивать кандидатов моделью или нет) и порог оценки.
+DOCS_RETRIEVAL_MODE = os.getenv("FFAI_DOCS_RETRIEVAL_MODE", "enhanced")
+DOCS_RELEVANCE_THRESHOLD = float(os.getenv("FFAI_DOCS_RELEVANCE_THRESHOLD", "0.6"))
+DOCS_RERANK_MAX_WORDS = int(os.getenv("FFAI_DOCS_RERANK_MAX_WORDS", "2000"))
+
 # Проверка ссылок: минимальная длина цитаты и число повторов до замены ответа.
 DOCS_CITATION_MIN_CHARS = int(os.getenv("FFAI_DOCS_CITATION_MIN_CHARS", "20"))
 DOCS_CITATION_RETRIES = int(os.getenv("FFAI_DOCS_CITATION_RETRIES", "1"))

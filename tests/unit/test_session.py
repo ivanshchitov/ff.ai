@@ -13,6 +13,7 @@ from core.api_client import APIError, AnswerMeta
 from core.history_manager import HistoryManager
 from core.mcp_client import MCPError
 from core.session import AnswerReady, AssistantSession, JournalLine, PhaseChanged
+from tests.conftest import rerank_answer
 
 
 class FakeClient:
@@ -23,11 +24,13 @@ class FakeClient:
         answer: str = "Это ответ.",
         started: threading.Event = None,
         release: threading.Event = None,
+        rerank_score: float = 0.9,
     ) -> None:
         self.answer = answer
         self.calls = []
         self.started = started
         self.release = release
+        self.rerank_score = rerank_score
 
     def ask_with_usage_messages(self, messages, max_tokens=None, temperature=None, model=None):
         self.calls.append(
@@ -38,6 +41,17 @@ class FakeClient:
                 "model": model,
             }
         )
+        rated = rerank_answer(messages, self.rerank_score)
+        if rated is not None:
+            return AnswerMeta(
+                content=rated,
+                model=model,
+                elapsed_seconds=0.1,
+                prompt_tokens=5,
+                completion_tokens=3,
+                total_tokens=8,
+                cost_usd=0.00001,
+            )
         if self.started is not None:
             self.started.set()
         if self.release is not None:
@@ -417,7 +431,9 @@ def test_docs_lines_show_state_and_fragments(repo: Path, docs_retriever, docs_fr
 
 def test_docs_report_is_available_without_a_question(repo: Path, docs_retriever):
     session = _session(repo, docs_retriever=docs_retriever)
-    assert "Поиска ещё не было" in session.docs_lines()[0]
+    lines = session.docs_lines()
+    assert any("Поиска ещё не было" in line for line in lines)
+    assert any("Режим отбора" in line for line in lines), "настройки видны и без поиска"
 
 
 def test_docs_mode_off_disables_search_and_check(repo: Path, docs_retriever, docs_fragment):
@@ -457,8 +473,10 @@ def test_docs_command_reports_without_model_requests(repo: Path, docs_retriever)
     session.run_command("/docs")
     session.run_command("/docs trace")
     session.ask("вопрос")
+    before = len(client.calls)
     session.run_command("/docs")
-    assert len(client.calls) == 1, "отчёты не обращаются к модели"
+    session.run_command("/docs trace")
+    assert len(client.calls) == before, "отчёты не обращаются к модели"
 
 
 def test_docs_mode_form_is_checked(repo: Path, docs_retriever):
@@ -477,3 +495,67 @@ def test_citations_snapshot_is_exposed(repo: Path, docs_retriever, docs_fragment
     check = session.last_citations
     assert check is not None and not check.confirmed
     assert check.replaced
+
+
+# --- режим отбора и порог --------------------------------------------------------------------
+
+
+def test_docs_retrieval_mode_command(repo: Path, docs_retriever):
+    session = _session(repo, docs_retriever=docs_retriever)
+    assert session.docs_retrieval == config.DOCS_RETRIEVAL_MODE
+
+    result = session.run_command("/docs retrieval baseline")
+    assert "baseline" in result.lines[0]
+    assert session.docs_retrieval == "baseline"
+    assert any("Режим отбора" in line for line in result.lines)
+
+    session.run_command("/docs retrieval enhanced")
+    assert session.docs_retrieval == "enhanced"
+
+    wrong = session.run_command("/docs retrieval наугад")
+    assert "Форма" in wrong.lines[0]
+    assert session.docs_retrieval == "enhanced"
+
+
+def test_docs_threshold_command(repo: Path, docs_retriever):
+    session = _session(repo, docs_retriever=docs_retriever)
+    result = session.run_command("/docs threshold 0,8")
+    assert "0.80" in result.lines[0]
+    assert session.docs_threshold == 0.8
+
+    for bad in ("1.5", "-0.1", "много"):
+        wrong = session.run_command(f"/docs threshold {bad}")
+        assert session.docs_threshold == 0.8, f"значение {bad} не должно применяться"
+        assert wrong.lines[0]
+    assert "от 0 до 1" in session.run_command("/docs threshold 1.5").lines[0]
+
+
+def test_report_shows_mode_threshold_and_scores(repo: Path, docs_retriever):
+    from tests.conftest import FakeCandidate, FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(
+        query="координаты",
+        candidates=(
+            FakeCandidate(path="doc/one", title="Первый", score=0.9, reason="подходит"),
+            FakeCandidate(path="doc/two", title="Второй", score=0.1, reason="другая тема"),
+        ),
+        rated=True,
+        threshold=0.6,
+    )
+    session = _session(repo, docs_retriever=docs_retriever)
+    session.ask("вопрос")
+    lines = "\n".join(session.docs_lines())
+    assert "Режим отбора: enhanced; порог: 0.60" in lines
+    assert "оценены" in lines
+    assert "0.90 — doc/one" in lines and "подходит" in lines
+    assert "0.10 — doc/two" in lines and "другая тема" in lines
+
+
+def test_no_matches_state_is_reported(repo: Path, docs_retriever):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="вопрос", status="no_matches", rated=True)
+    session = _session(repo, docs_retriever=docs_retriever)
+    session.ask("вопрос")
+    lines = "\n".join(session.docs_lines())
+    assert "Состояние: no_matches" in lines

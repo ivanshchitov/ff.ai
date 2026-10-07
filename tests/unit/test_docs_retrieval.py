@@ -765,3 +765,102 @@ def test_versions_property_is_quiet_on_failure(domain, spec):
     # Сбой не кэшируется: следующий поиск снова спросит список версий.
     assert finder.versions == ()
     assert len(client.calls_of("tool_versions")) == 2
+
+
+# --- вторая ступень отбора: оценка кандидатов ----------------------------------------------
+
+from core import docs_reranking  # noqa: E402
+
+RERANK_TOOLS = {"versions": "tool_versions", "search": "tool_search", "document": "tool_document"}
+
+
+def _rated_client(*, scores, documents=True) -> StubClient:
+    """Заглушка с поиском, полным текстом и списком версий — минимальный набор для второй ступени."""
+    answers = {
+        "tool_versions": versions_text(entry("5.2.1", latest=1)),
+        "tool_search": search_text(
+            hit("guide/one", title="Первый"), hit("guide/two", title="Второй")
+        ),
+    }
+    if documents:
+        answers["tool_document"] = lambda arguments: document_text(
+            arguments["path"], f"Текст документа {arguments['path']} про координаты и сборку."
+        )
+    client = StubClient(answers)
+    client.scores = scores
+    return client
+
+
+def rating_json(*pairs) -> str:
+    return json.dumps(
+        {"results": [{"id": i, "score": s, "reason": f"оценка {i}"} for i, s in pairs]},
+        ensure_ascii=False,
+    )
+
+
+def _rate_with(scores):
+    def rate(question, candidates):
+        return rating_json(*scores)
+
+    return rate
+
+
+def test_rate_keeps_only_candidates_above_threshold(domain, spec):
+    client = _rated_client(scores=(0.9, 0.1))
+    report = retriever(domain, spec, client).search(
+        "как получить координаты?", rate=_rate_with([(1, 0.9), (2, 0.1)]), threshold=0.6
+    )
+    assert report.status == "ok"
+    assert [fragment.identifier for fragment in report.fragments] == ["guide/one"]
+    assert [candidate.score for candidate in report.candidates] == [0.9, 0.1]
+    assert report.rated is True and report.threshold == 0.6
+    assert client.calls_of("tool_text") == [{"path": "guide/one", "index": "guide"}], (
+        "полный текст запрашивается только для прошедших порог"
+    )
+
+
+def test_rate_can_drop_everything(domain, spec):
+    client = _rated_client(scores=(0.1, 0.1))
+    report = retriever(domain, spec, client).search(
+        "как получить координаты?", rate=_rate_with([(1, 0.1), (2, 0.1)]), threshold=0.6
+    )
+    assert report.status == "no_matches"
+    assert report.fragments == ()
+    assert len(report.candidates) == 2, "снимок сохраняет кандидатов с их оценками"
+    assert client.calls_of("tool_text") == [], "без прошедших порог ничего не выгружается"
+
+
+def test_rate_failure_is_a_visible_state(domain, spec):
+    client = _rated_client(scores=(0.9, 0.9))
+
+    def broken(question, candidates):
+        return "не JSON вовсе"
+
+    report = retriever(domain, spec, client).search(
+        "как получить координаты?", rate=broken, threshold=0.6
+    )
+    assert report.status == "rerank_failed"
+    assert report.fragments == ()
+    assert "не разобран" in report.error
+    assert client.calls_of("tool_text") == []
+
+
+def test_rate_exception_is_a_visible_state(domain, spec):
+    def exploding(question, candidates):
+        raise RuntimeError("модель недоступна")
+
+    client = _rated_client(scores=(0.9, 0.9))
+    report = retriever(domain, spec, client).search(
+        "как получить координаты?", rate=exploding, threshold=0.6
+    )
+    assert report.status == "rerank_failed"
+    assert "модель недоступна" in report.error
+
+
+def test_without_rate_everything_is_delivered_as_before(domain, spec):
+    client = _rated_client(scores=(0.9, 0.9))
+    report = retriever(domain, spec, client).search("как получить координаты?")
+    assert report.status == "ok"
+    assert len(report.fragments) == 2
+    assert report.rated is False and report.threshold == 0.0
+    assert [candidate.score for candidate in report.candidates] == [0.0, 0.0]

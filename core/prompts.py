@@ -17,6 +17,8 @@ from .domains import Domain
 # тест сверяет обе пары, поэтому разойтись они не могут, а импорт на уровне модуля не нужен —
 # сообщения собираются даже тогда, когда поиск в сборке не подключён.
 DOCS_STATUS_NO_CANDIDATES = "no_candidates"
+DOCS_STATUS_NO_MATCHES = "no_matches"
+DOCS_STATUS_RERANK_FAILED = "rerank_failed"
 DOCS_STATUS_UNAVAILABLE = "unavailable"
 
 _FORMAT_ASSET_NAMES = {
@@ -93,6 +95,20 @@ def docs_state_message(report: object) -> Optional[str]:
             f"Документация портала разработчиков недоступна ({error}). Платформенные факты без "
             "источника не утверждай: если вопрос о платформе, скажи, что документация недоступна, "
             "и предложи повторить запрос."
+        )
+    if status == DOCS_STATUS_NO_MATCHES:
+        dropped = len(getattr(report, "candidates", ()) or ())
+        return (
+            f"Найдено кандидатов: {dropped}, но ни один не признан относящимся к вопросу. "
+            "Платформенные утверждения без источника не делай: если вопрос о платформе, скажи, "
+            "что подходящего места в документации найти не удалось, и попроси уточнить вопрос."
+        )
+    if status == DOCS_STATUS_RERANK_FAILED:
+        error = str(getattr(report, "error", "") or "причина неизвестна")
+        return (
+            f"Найденные фрагменты документации не удалось проверить на соответствие вопросу "
+            f"({error}). Платформенные факты без источника не утверждай: если вопрос о платформе, "
+            "скажи, что источник не подтверждён, и предложи повторить запрос."
         )
     if status == DOCS_STATUS_NO_CANDIDATES:
         sections = ", ".join(getattr(report, "sections", ()) or ())
