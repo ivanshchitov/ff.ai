@@ -13,6 +13,12 @@ from . import config
 from .answer_settings import AnswerFormat, AnswerSettings
 from .domains import Domain
 
+# Словарь состояний поиска по документации. Строки объявлены и здесь, и в `core.docs_retrieval`:
+# тест сверяет обе пары, поэтому разойтись они не могут, а импорт на уровне модуля не нужен —
+# сообщения собираются даже тогда, когда поиск в сборке не подключён.
+DOCS_STATUS_NO_CANDIDATES = "no_candidates"
+DOCS_STATUS_UNAVAILABLE = "unavailable"
+
 _FORMAT_ASSET_NAMES = {
     AnswerFormat.COMPACT: "answer_format_compact.md",
     AnswerFormat.JSON: "answer_format_json.md",
@@ -53,3 +59,47 @@ def build_user_prompt(question: str, settings: AnswerSettings) -> str:
         f"Объём: не более {settings.max_words} слов.",
     ]
     return "\n\n".join(parts)
+
+
+def docs_note(report: object) -> str:
+    """Примечание к блоку фрагментов: версия документации и версия установленного SDK.
+
+    Рассинхрон версий проговаривается здесь, а не в промпте домена: промпт знает правило, но не
+    знает чисел — их приносит снимок поиска.
+    """
+    parts = []
+    version = str(getattr(report, "version", "") or "")
+    if version:
+        parts.append(f"версия документации: {version}")
+    sdk_version = str(getattr(report, "sdk_version", "") or "")
+    if sdk_version and version and sdk_version != version:
+        parts.append(
+            f"локально установлен SDK {sdk_version}: проверь, не описывает ли документация "
+            "более новую версию"
+        )
+    return "; ".join(parts)
+
+
+def docs_state_message(report: object) -> Optional[str]:
+    """Инструкция на случай, когда фрагментов нет: недоступен сервер или ничего не нашлось.
+
+    Молчание здесь читалось бы как разрешение ответить по памяти, а платформа версионируется:
+    поэтому состояние поиска всегда проговаривается модели.
+    """
+    status = str(getattr(report, "status", "") or "")
+    if status == DOCS_STATUS_UNAVAILABLE:
+        error = str(getattr(report, "error", "") or "причина неизвестна")
+        return (
+            f"Документация портала разработчиков недоступна ({error}). Платформенные факты без "
+            "источника не утверждай: если вопрос о платформе, скажи, что документация недоступна, "
+            "и предложи повторить запрос."
+        )
+    if status == DOCS_STATUS_NO_CANDIDATES:
+        sections = ", ".join(getattr(report, "sections", ()) or ())
+        where = f" (искал в разделах: {sections})" if sections else ""
+        return (
+            f"По этому запросу в документации портала ничего не нашлось{where}. Платформенные "
+            "утверждения без источника не делай: если вопрос о платформе, скажи, что ответа "
+            "в документации нет, и попроси уточнить вопрос."
+        )
+    return None

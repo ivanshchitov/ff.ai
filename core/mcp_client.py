@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -138,6 +139,74 @@ class MCPCallResult:
     is_error: bool = False
 
 
+class MCPSession:
+    """Живое соединение на время операции: одно подключение на несколько вызовов.
+
+    Одноразовый вызов поднимает серверный процесс заново — для stdio это секунды на вызов,
+    а поиск по документации делает их пять. Сессия держит соединение открытым, пока операция
+    не закончится, и закрывает его за собой, даже если внутри была ошибка.
+
+    Асинхронная библиотека живёт в отдельном потоке со своим событийным циклом: приложение
+    синхронное, и удерживать соединение между вызовами иначе нечем.
+    """
+
+    def __init__(self, client: "MCPClient") -> None:
+        self._client = client
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._context: Any = None
+        self._connection: Any = None
+
+    def __enter__(self) -> "MCPSession":
+        self._loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(self._loop)
+            ready.set()
+            self._loop.run_forever()
+
+        self._thread = threading.Thread(target=run_loop, name="mcp-session", daemon=True)
+        self._thread.start()
+        ready.wait(5)
+        self._connection = self._submit(self._open())
+        self._client._session = self
+        return self
+
+    async def _open(self) -> Any:
+        self._context = self._client._client()
+        return await self._context.__aenter__()
+
+    def _submit(self, coroutine: Any) -> Any:
+        """Ждём результат в вызывающем потоке: предел — таймаут клиента плюс запас на закрытие."""
+        assert self._loop is not None
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        return future.result(self._client.timeout + 10)
+
+    def call_tool(self, name: str, arguments: Dict[str, Any]) -> MCPCallResult:
+        result = self._submit(self._connection.call_tool(name, dict(arguments)))
+        return MCPCallResult(
+            server=self._client.spec.name,
+            tool=name,
+            arguments=dict(arguments),
+            text=_content_text(result),
+            is_error=bool(getattr(result, "is_error", False)),
+        )
+
+    def __exit__(self, *exc_info: Any) -> None:
+        try:
+            if self._context is not None:
+                self._submit(self._context.__aexit__(None, None, None))
+        except Exception:  # noqa: BLE001 - сбой закрытия не должен ломать уже полученный результат
+            pass
+        finally:
+            self._client._session = None
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+
+
 class MCPClient:
     """Клиент одного сервера: подключиться, спросить инструменты, вызвать инструмент."""
 
@@ -150,6 +219,12 @@ class MCPClient:
         self.spec = spec
         self._env = dict(env) if env is not None else None
         self.timeout = float(timeout if timeout is not None else config.MCP_TIMEOUT)
+        # Открытая сессия: пока она есть, вызовы идут через неё, а не поднимают процесс заново.
+        self._session: Optional[MCPSession] = None
+
+    def session(self) -> MCPSession:
+        """Открывает соединение на время операции: `with client.session() as session: ...`."""
+        return MCPSession(self)
 
     # --- публичные операции ---------------------------------------------------------------
 
@@ -167,8 +242,14 @@ class MCPClient:
             return self._failed(_describe(error))
 
     def call_tool(self, tool: str, arguments: Optional[Dict[str, Any]] = None) -> MCPCallResult:
-        """Вызывает инструмент; сбой подключения — `MCPError`, отказ инструмента — данные."""
+        """Вызывает инструмент; сбой подключения — `MCPError`, отказ инструмента — данные.
+
+        Если открыта сессия, вызов идёт по её соединению — так поиск по документации платит
+        за запуск серверного процесса один раз, а не за каждый инструмент.
+        """
         arguments = dict(arguments or {})
+        if self._session is not None:
+            return self._session.call_tool(tool, arguments)
         try:
             return asyncio.run(self._call(tool, arguments))
         except MCPError:

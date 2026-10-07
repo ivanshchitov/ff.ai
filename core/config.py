@@ -87,6 +87,9 @@ REQUEST_TIMEOUT = int(os.getenv("FFAI_REQUEST_TIMEOUT", "90"))
 # Таймаут подключения к MCP-серверу: поиск по порталу отвечает секундами, но медленный
 # сервер не должен держать интерфейс бесконечно.
 MCP_TIMEOUT = float(os.getenv("FFAI_MCP_TIMEOUT", "60"))
+# Имя сервера, которым окружение заменяет реестр целиком. Тесты и демонстрации подставляют
+# сюда имя того сервера, который изображают: иначе домен не найдёт свой корпус документации.
+MCP_OVERRIDE_NAME = os.getenv("FFAI_MCP_NAME", "из окружения")
 MAX_RETRIES = 3
 TRANSIENT_STATUSES = (502, 503, 504)
 
@@ -200,6 +203,16 @@ MIN_PLAN_ITEMS = 3
 
 
 # --- Прочее -----------------------------------------------------------------
+
+# Корпус документации портала: сколько кандидатов берём из поиска, сколько фрагментов доставляем
+# модели и как режем текст, чтобы документ не съел бюджет запроса.
+DOCS_SEARCH_LIMIT = int(os.getenv("FFAI_DOCS_SEARCH_LIMIT", "5"))
+DOCS_MAX_FRAGMENTS = int(os.getenv("FFAI_DOCS_MAX_FRAGMENTS", "3"))
+DOCS_FRAGMENT_CHARS = int(os.getenv("FFAI_DOCS_FRAGMENT_CHARS", "1500"))
+DOCS_SNIPPET_CHARS = int(os.getenv("FFAI_DOCS_SNIPPET_CHARS", "400"))
+# Проверка ссылок: минимальная длина цитаты и число повторов до замены ответа.
+DOCS_CITATION_MIN_CHARS = int(os.getenv("FFAI_DOCS_CITATION_MIN_CHARS", "20"))
+DOCS_CITATION_RETRIES = int(os.getenv("FFAI_DOCS_CITATION_RETRIES", "1"))
 
 MAX_INPUT_LENGTH = 2000
 ESTIMATED_CHARS_PER_TOKEN = 3  # приближение для клиентской оценки токенов (см. core/usage.py)

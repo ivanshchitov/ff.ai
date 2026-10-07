@@ -83,6 +83,7 @@ class AppSession:
         mcp_command: Optional[str] = None,
         mcp_args: Optional[str] = None,
         mcp_url: Optional[str] = None,
+        mcp_name: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
         extra_env: Optional[dict] = None,
@@ -154,6 +155,9 @@ class AppSession:
             env["FFAI_REQUEST_TIMEOUT"] = "1"
         # Реестр MCP подменяется локальной заглушкой: без этого каждый прогон — тест в том
         # числе — поднимал бы сервер документации портала и ходил в сеть.
+        if mcp_name is not None:
+            # Имя сервера-заглушки: домен ищет свой корпус документации по имени записи реестра.
+            env["FFAI_MCP_NAME"] = mcp_name
         if mcp_command == "":
             # Пустая строка — явная просьба не подменять реестр: так запускается живая проверка
             # с настоящими серверами (документация портала и собственный сервер репозитория).
@@ -354,7 +358,9 @@ class AppSession:
         ожидание срабатывало бы мгновенно, не дожидаясь нынешнего запроса. Поэтому считается
         число строк метрик до отправки и ожидается его рост.
         """
-        self.wait_for_prompt()
+        # Таймаут вопроса распространяется и на ожидание приглашения: стартовый обход реестра
+        # с настоящими (пусть и локальными) серверами занимает секунды.
+        self.wait_for_prompt(timeout=timeout)
         if expect is not METRICS_MARKER:
             self.send_line(question)
             return self.wait_for(expect, timeout=timeout)

@@ -2,6 +2,7 @@
 
 import io
 import sys
+from dataclasses import dataclass
 import time
 from pathlib import Path
 from typing import List
@@ -241,3 +242,68 @@ class FakeMCPFactory:
 @pytest.fixture
 def mcp_factory():
     return FakeMCPFactory()
+
+
+@dataclass(frozen=True)
+class FakeFragment:
+    """Доставленный фрагмент для проверок: те же поля, что у настоящего."""
+
+    identifier: str
+    source: str
+    text: str
+    section: str = "docs"
+    version: str = "5.2.1"
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class FakeDocsReport:
+    """Снимок поиска по документации: поля совпадают с настоящим отчётом."""
+
+    query: str
+    sections: tuple = ("docs",)
+    version: str = "5.2.1"
+    status: str = "ok"
+    candidates: tuple = ()
+    fragments: tuple = ()
+    error: str = ""
+    sdk_version: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+class FakeDocsRetriever:
+    """Ретривер без сети: отдаёт заранее собранный снимок и записывает запросы."""
+
+    def __init__(self, report: FakeDocsReport = None) -> None:
+        self.report = report if report is not None else FakeDocsReport(query="вопрос")
+        self.queries = []
+        self.version = ""
+        self.refreshes = 0
+
+    def search(self, question: str):
+        self.queries.append((question, self.version))
+        return self.report
+
+    def refresh_versions(self):
+        self.refreshes += 1
+        return (self.report.version,)
+
+
+@pytest.fixture
+def docs_retriever():
+    return FakeDocsRetriever()
+
+
+@pytest.fixture
+def docs_fragment():
+    return FakeFragment(
+        identifier="doc/software_development/guides/cpp_api/positioning",
+        source="developer.auroraos.ru",
+        text=(
+            "Информацию о местоположении предоставляет служба Geoclue, "
+            "а модуль Qt Positioning даёт к ней доступ из C++ и QML."
+        ),
+    )

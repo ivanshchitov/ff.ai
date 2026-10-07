@@ -17,8 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import config, context_compressor, context_strategies, prompts
-from .answer_settings import AnswerSettings, ContextStrategy
+from . import citations, config, context_compressor, context_strategies, prompts
+from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
 from .domains import Domain
 from .history_manager import HistoryManager
@@ -76,6 +76,9 @@ class AgentConfig:
 
     settings: AnswerSettings = field(default_factory=AnswerSettings)
     model: str = config.DEFAULT_MODEL
+    # Поиск по документации портала — решение сессии (как модель и настройки ответа): выключенный
+    # режим не делает ни одного обращения к серверу и не добавляет ни одного сообщения.
+    docs_enabled: bool = True
 
     @property
     def format(self):
@@ -109,6 +112,7 @@ class RepoAgent:
         settings: Optional[AnswerSettings] = None,
         model: Optional[str] = None,
         history: Optional[HistoryManager] = None,
+        docs_retriever: Optional[object] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -136,6 +140,12 @@ class RepoAgent:
         self._last_result: Optional[AnswerMeta] = None
         self._last_compression: Optional[CompressionReport] = None
         self._last_facts: Optional[FactsReport] = None
+        # Поиск по документации: сам поиск делает ретривер (данные домена + сервер портала),
+        # агент лишь решает, когда его звать, и что из найденного уходит в запрос.
+        self.docs_retriever = docs_retriever
+        self._last_docs_report: Optional[object] = None
+        self._docs_fragments: tuple = ()
+        self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
     # --- доступ к состоянию ---------------------------------------------------------------
@@ -190,13 +200,95 @@ class RepoAgent:
         не отменяет — он уходит с прежним блоком фактов.
         """
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
+        self._retrieve_docs(question)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
         meta = self._ask_question(messages)
+        meta = self._enforce_citations(messages, meta, on_phase)
         self._remember(user_prompt, meta.content)
         self.history.add(question, meta.content, usage=self._usage_block(meta))
         return meta
+
+    # --- документация портала и проверка ссылок -------------------------------------------
+
+    def _retrieve_docs(self, question: str) -> None:
+        """Ищет фрагменты документации перед вопросом; сбой поиска вопрос не отменяет.
+
+        Поиск идёт до сборки запроса: найденное — данные именно этого вопроса. Выключенный режим
+        и отсутствующий ретривер означают одно: поиска нет и сообщений о нём тоже.
+        """
+        self._last_citations = None
+        self._docs_fragments = ()
+        if not self.config.docs_enabled or self.docs_retriever is None:
+            self._last_docs_report = None
+            return
+        # Версия документации — свойство ретривера: её задаёт пользователь командой, а в снимок
+        # она попадает так, как её выбрал сервер или пользователь.
+        self._last_docs_report = self.docs_retriever.search(question)
+        self._docs_fragments = tuple(getattr(self._last_docs_report, "fragments", ()) or ())
+
+    def docs_report(self) -> Optional[object]:
+        """Снимок последнего поиска: что искали, где, в какой версии, что доставили."""
+        return self._last_docs_report
+
+    @property
+    def last_citations(self) -> Optional[citations.CitationsCheck]:
+        return self._last_citations
+
+    def _citations_enabled(self) -> bool:
+        """Проверка имеет смысл только при доставленных фрагментах и свободном формате.
+
+        У форматов JSON, компактного и диффа свои контракты: обязательные блоки цитат им бы
+        противоречили, поэтому источники им печатает терминальный слой.
+        """
+        return bool(self._docs_fragments) and self.config.format is AnswerFormat.FREE
+
+    def _enforce_citations(
+        self,
+        messages: List[Dict[str, str]],
+        meta: AnswerMeta,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> AnswerMeta:
+        """Проверка ссылок кодом: повтор с перечнем нарушений, затем замена ответа.
+
+        Как у инвариантов: повтор — продолжение того же диалога, а если повтор тоже не подтверждён,
+        до пользователя доходит только фиксированный текст, и именно он идёт в лог и историю.
+        """
+        if not self._citations_enabled():
+            return meta
+        check = citations.check_answer(meta.content, self._docs_fragments)
+        if check.confirmed:
+            self._last_citations = check
+            return meta
+        final = check.violations
+        for _ in range(config.DOCS_CITATION_RETRIES):
+            self._signal(on_phase, RequestPhase.REQUEST)
+            retry = messages + [
+                {"role": "assistant", "content": meta.content},
+                {"role": "user", "content": citations.retry_prompt(final)},
+            ]
+            meta = self._ask_question(retry)
+            repeated = citations.check_answer(meta.content, self._docs_fragments)
+            if repeated.confirmed:
+                self._last_citations = citations.CitationsCheck(
+                    violations=check.violations, retried=True
+                )
+                return meta
+            final = repeated.violations
+        self._last_citations = citations.CitationsCheck(
+            violations=check.violations, retried=True, replaced=True, final_violations=final
+        )
+        return AnswerMeta(
+            content=citations.disclaimer_text(),
+            model=meta.model,
+            elapsed_seconds=meta.elapsed_seconds,
+            prompt_tokens=meta.prompt_tokens,
+            completion_tokens=meta.completion_tokens,
+            total_tokens=meta.total_tokens,
+            cost_usd=meta.cost_usd,
+            finish_reason=meta.finish_reason,
+        )
 
     def reset(self) -> None:
         """Опустошает диалог и его память (команда /clear). Файлы других слоёв не трогает."""
@@ -211,6 +303,10 @@ class RepoAgent:
         self._last_compression = None
         self._last_facts = None
         self._last_result = None
+        # Снимок проверки относится к последнему ответу — он сбрасывается вместе с диалогом.
+        self._last_citations = None
+        # Снимок поиска по документации не сбрасывается: это результат уже выполненной операции,
+        # и /clear его не отменяет (то же правило, что у снимка сжатия).
         self.history.clear()
         self._ledger.reset()
 
@@ -279,12 +375,34 @@ class RepoAgent:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)}
         ]
+        docs_message = self._docs_message()
+        if docs_message is not None:
+            messages.append(docs_message)
+            if self._citations_enabled():
+                messages.append({"role": "system", "content": citations.citations_message()})
         strategy_memory = self._strategy_memory_message()
         if strategy_memory is not None:
             messages.append(strategy_memory)
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages
+
+    def _docs_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение о доставленных фрагментах или о состоянии поиска.
+
+        Есть фрагменты — уходит блок с заголовками (путь, раздел, версия). Фрагментов нет, но
+        поиск был — уходит инструкция о том, что источника нет: молчание модели читалось бы как
+        разрешение ответить по памяти.
+        """
+        report = self._last_docs_report
+        if report is None:
+            return None
+        if self._docs_fragments:
+            note = prompts.docs_note(report)
+            content = citations.context_message(self._docs_fragments, note=note)
+            return {"role": "system", "content": content} if content else None
+        state_message = prompts.docs_state_message(report)
+        return {"role": "system", "content": state_message} if state_message else None
 
     def _strategy_memory_message(self) -> Optional[Dict[str, str]]:
         """Сообщение памяти стратегии: резюме или блок фактов, если они непусты."""

@@ -106,6 +106,11 @@ class CommandResult:
     domain_changed: bool = False
 
 
+# Отличие «ретривер не передан» от «ретривера нет»: первое означает «собери по данным домена»,
+# второе — «поиска по документации в этой сессии не будет». Тестам нужен именно второй случай.
+RETRIEVER_UNSET = object()
+
+
 class AssistantSession:
     """Сессия ассистента: агент, домен, настройки ответа, модель и расход."""
 
@@ -118,6 +123,7 @@ class AssistantSession:
         history: Optional[HistoryManager] = None,
         settings: Optional[AnswerSettings] = None,
         mcp_client_factory: Optional[Callable[[MCPServerSpec], MCPClient]] = None,
+        docs_retriever: object = RETRIEVER_UNSET,
     ) -> None:
         self.root = Path(root)
         self._lock = threading.RLock()
@@ -127,18 +133,27 @@ class AssistantSession:
         self._selection = domains.select_domain(
             root=self.root, explicit=domain_id, domains_dir=domains_dir
         )
+        self._domains_dir = domains_dir
+        # Фабрика клиентов MCP: тесты подменяют её, чтобы не поднимать серверные процессы.
+        self._mcp_client_factory = mcp_client_factory or MCPClient
+        # Ретривер по документации собирается по данным домена и до агента: агент получает его
+        # готовым, иначе пришлось бы менять ретривер у уже созданного агента. Явный `None`
+        # означает «поиска не будет» — так тесты и прогоны без сети отключают корпус целиком.
+        self._docs_retriever = (
+            self._build_docs_retriever()
+            if docs_retriever is RETRIEVER_UNSET
+            else docs_retriever
+        )
+        self._mcp_specs: Tuple[MCPServerSpec, ...] = ()
+        self._mcp_connections: Tuple[MCPConnection, ...] = ()
         self._agent = RepoAgent(
             domain=self._selection.domain,
             client=client,
             root=self.root,
             settings=settings if settings is not None else AnswerSettings(),
             history=self._history,
+            docs_retriever=self._docs_retriever,
         )
-        self._domains_dir = domains_dir
-        # Фабрика клиентов MCP: тесты подменяют её, чтобы не поднимать серверные процессы.
-        self._mcp_client_factory = mcp_client_factory or MCPClient
-        self._mcp_specs: Tuple[MCPServerSpec, ...] = ()
-        self._mcp_connections: Tuple[MCPConnection, ...] = ()
 
     # --- доступ к состоянию ---------------------------------------------------------------
 
@@ -275,6 +290,8 @@ class AssistantSession:
                 return CommandResult(command="/usage", lines=self.usage_lines())
             if command == "/domain":
                 return self._domain_command(argument)
+            if command == "/docs":
+                return self._docs_command(argument)
             if command == "/mcp":
                 return self._mcp_command(argument)
             if command == "/tool":
@@ -293,6 +310,111 @@ class AssistantSession:
     def context_report(self) -> ContextReport:
         with self._lock:
             return self._agent.context_report()
+
+    def _build_docs_retriever(self) -> Optional[object]:
+        """Собирает ретривер документации по данным домена; нет корпуса — нет ретривера.
+
+        Домен без внешнего корпуса документации — законный случай: тогда агент не ищет ничего
+        и не добавляет сообщений о поиске.
+        """
+        docs = getattr(self.domain, "docs", None)
+        if docs is None:
+            return None
+        spec = next(
+            (
+                candidate
+                for candidate in mcp_registry.registry(self.domain, self.root)
+                if candidate.name == docs.server
+            ),
+            None,
+        )
+        if spec is None:
+            return None
+        from .docs_retrieval import DocsRetriever
+
+        return DocsRetriever(
+            self._mcp_client_factory,
+            spec,
+            docs,
+            sdk_version=str(getattr(self.domain, "local_sdk_version", "") or ""),
+        )
+
+    def docs_report(self) -> Optional[object]:
+        """Снимок последнего поиска по документации (или None, если поиска не было)."""
+        with self._lock:
+            return self._agent.docs_report()
+
+    @property
+    def last_citations(self):
+        with self._lock:
+            return self._agent.last_citations
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self._agent.config.docs_enabled
+
+    def docs_lines(self) -> Tuple[str, ...]:
+        """Отчёт о поиске по документации: запрос, разделы, версия, доставленные фрагменты."""
+        if not self.docs_enabled:
+            return ("Поиск по документации выключен (/docs mode on — включить).",)
+        report = self.docs_report()
+        if report is None:
+            return ("Поиска ещё не было: он выполняется перед каждым вопросом.",)
+        lines = [
+            f"Запрос: {getattr(report, 'query', '')}",
+            f"Разделы: {', '.join(getattr(report, 'sections', ()) or ()) or 'н/д'}; "
+            f"версия документации: {getattr(report, 'version', '') or 'н/д'}"
+            + (
+                f"; локальный SDK: {getattr(report, 'sdk_version', '')}"
+                if getattr(report, "sdk_version", "")
+                else ""
+            ),
+            f"Состояние: {getattr(report, 'status', '')}"
+            + (f" ({getattr(report, 'error', '')})" if getattr(report, "error", "") else ""),
+        ]
+        candidates = getattr(report, "candidates", ()) or ()
+        if candidates:
+            lines.append(f"Найдено кандидатов: {len(candidates)}")
+            for candidate in candidates[:5]:
+                lines.append(
+                    f"    {getattr(candidate, 'path', '')} — {getattr(candidate, 'title', '')} "
+                    f"({getattr(candidate, 'section', '')})"
+                )
+        fragments = getattr(report, "fragments", ()) or ()
+        lines.append(f"Доставлено фрагментов: {len(fragments)}")
+        for fragment in fragments:
+            lines.append(
+                f"    {getattr(fragment, 'identifier', '')} — раздел "
+                f"{getattr(fragment, 'section', '')}, {len(getattr(fragment, 'text', '') or '')} симв."
+                + (" (обрезан)" if getattr(fragment, "truncated", False) else "")
+            )
+        return tuple(lines)
+
+    def _docs_command(self, argument: str) -> CommandResult:
+        """`/docs` — отчёт, `/docs mode on|off`, `/docs version <версия>`, `/docs trace`."""
+        argument = argument.strip()
+        if argument.startswith("mode"):
+            value = argument[len("mode") :].strip().lower()
+            if value not in ("on", "off"):
+                return CommandResult(command="/docs", lines=("Форма: /docs mode on|off",))
+            self._agent.config.docs_enabled = value == "on"
+            state = "включён" if self.docs_enabled else "выключен"
+            return CommandResult(
+                command="/docs",
+                lines=(f"Поиск по документации {state}.",)
+                + (self.docs_lines() if self.docs_enabled else ()),
+            )
+        if argument.startswith("version"):
+            value = argument[len("version") :].strip()
+            if self._docs_retriever is None:
+                return CommandResult(
+                    command="/docs", lines=("Домен не объявляет корпус документации.",)
+                )
+            self._docs_retriever.version = value
+            self._docs_retriever.refresh_versions()
+            chosen = value or "актуальная по данным сервера"
+            return CommandResult(command="/docs", lines=(f"Версия документации: {chosen}.",))
+        return CommandResult(command="/docs", lines=self.docs_lines())
 
     # --- MCP: серверы, отчёт, вызов инструмента -------------------------------------------
 

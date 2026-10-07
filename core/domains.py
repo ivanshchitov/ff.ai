@@ -79,6 +79,31 @@ class Invariant:
 
 
 @dataclass(frozen=True)
+class DocsTools:
+    """Имена инструментов сервера документации: они тоже данные, а не код ядра."""
+
+    versions: str
+    search: str
+    document: str
+
+
+@dataclass(frozen=True)
+class DomainDocs:
+    """Корпус документации домена: какой сервер читать и как по нему искать.
+
+    Разделы, слова-признаки версий и имена инструментов объявляет пакет: ядро не знает ни
+    названия разделов портала, ни имён инструментов его сервера.
+    """
+
+    server: str
+    source: str
+    default_section: str
+    version_sections: Tuple[str, ...]
+    version_keywords: Tuple[str, ...]
+    tools: DocsTools
+
+
+@dataclass(frozen=True)
 class Domain:
     id: str
     title: str
@@ -94,6 +119,8 @@ class Domain:
     servers: Tuple[MCPServerSpec, ...] = ()
     # Файл белых списков команд и git-подкоманд — данные для собственного сервера репозитория.
     tools_path: Optional[Path] = None
+    # Корпус документации домена: сервер, разделы, слова-признаки версий и имена инструментов.
+    docs: Optional[DomainDocs] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -210,6 +237,39 @@ def _load_servers(path: Path) -> Tuple[MCPServerSpec, ...]:
     return tuple(servers)
 
 
+def _load_docs(path: Path) -> Optional[DomainDocs]:
+    """Необязательный раздел пакета: корпус документации домена.
+
+    Отсутствие файла означает «у домена нет внешнего корпуса документации» — это законный случай,
+    а сломанный файл обязан остановить загрузку: иначе поиск молча пойдёт не туда.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+    tools_raw = _require(data, "tools", path, dict)
+    tools = DocsTools(
+        versions=str(_require(tools_raw, "versions", path, str)),
+        search=str(_require(tools_raw, "search", path, str)),
+        document=str(_require(tools_raw, "document", path, str)),
+    )
+    raw_sections = _require(data, "version_sections", path, list)
+    if any(not isinstance(item, str) or not item.strip() for item in raw_sections):
+        raise DomainSchemaError(f"{path}: поле «version_sections» должно быть списком непустых строк")
+    raw_keywords = data.get("version_keywords", [])
+    if not isinstance(raw_keywords, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_keywords
+    ):
+        raise DomainSchemaError(f"{path}: поле «version_keywords» должно быть списком непустых строк")
+    return DomainDocs(
+        server=str(_require(data, "server", path, str)),
+        source=str(_require(data, "source", path, str)),
+        default_section=str(_require(data, "default_section", path, str)),
+        version_sections=tuple(item.strip() for item in raw_sections),
+        version_keywords=tuple(item.strip() for item in raw_keywords),
+        tools=tools,
+    )
+
+
 def available_domains(domains_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """Идентификаторы установленных пакетов — по каталогам с `domain.json`."""
     root = Path(domains_dir or config.DOMAINS_DIR)
@@ -250,6 +310,7 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         path=path,
         servers=_load_servers(path / "servers.json"),
         tools_path=(path / "tools.json") if (path / "tools.json").is_file() else None,
+        docs=_load_docs(path / "docs.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

@@ -153,6 +153,8 @@ class DevAssistantTUI:
             return
         self._print_answer(answer.text)
         self._print_journal()
+        self._print_sources()
+        self._print_docs_journal()
         self._print_warnings(answer.meta)
         self._print_usage_meta(answer.meta)
 
@@ -241,6 +243,49 @@ class DevAssistantTUI:
         for text in self._journal:
             self.console.print(f"[dim]{escape(text)}[/dim]")
         self._journal = []
+
+    def _print_sources(self) -> None:
+        """Строка источников: доставленные фрагменты документации, на которые ответ мог опереться.
+
+        Печатается по снимку поиска, поэтому ничего не перезапрашивает и не зависит от того,
+        сослался ли на них ответ — это то, что приложение реально передало модели.
+        """
+        report = self.session.docs_report()
+        fragments = getattr(report, "fragments", ()) or ()
+        if not fragments:
+            return
+        rendered = "; ".join(
+            f"{escape(str(getattr(item, 'identifier', '')))} — раздел "
+            f"{escape(str(getattr(item, 'section', '')))}"
+            for item in fragments
+        )
+        version = escape(str(getattr(report, "version", "") or "н/д"))
+        self.console.print(f"[dim]📚 Источники (документация {version}): {rendered}[/dim]")
+
+    def _print_docs_journal(self) -> None:
+        """Строки журнала о поиске и проверке ссылок: только отклонения от нормы."""
+        report = self.session.docs_report()
+        status = str(getattr(report, "status", "") or "")
+        if status == "unavailable":
+            reason = escape(str(getattr(report, "error", "") or "причина неизвестна"))
+            self.console.print(f"[bold yellow]📚 Документация портала недоступна: {reason}[/bold yellow]")
+        elif status == "no_candidates":
+            self.console.print(
+                "[dim]📚 В документации портала по этому вопросу ничего не найдено.[/dim]"
+            )
+        check = self.session.last_citations
+        if check is None:
+            return
+        if check.opted_out:
+            self.console.print(
+                "[dim]📚 Ответ без ссылки: документация к вопросу не относится.[/dim]"
+            )
+        elif check.replaced:
+            self.console.print(
+                "[bold yellow]📚 Ссылки не подтверждены: ответ заменён — источников нет.[/bold yellow]"
+            )
+        elif check.retried:
+            self.console.print("[dim]📚 Ответ не подтверждён — повторный запрос.[/dim]")
 
     def _print_warnings(self, meta: Optional[AnswerMeta]) -> None:
         if meta is None:

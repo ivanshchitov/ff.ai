@@ -1,0 +1,12 @@
+{
+  "server": "aurora-docs",
+  "source": "developer.auroraos.ru",
+  "default_section": "docs",
+  "version_sections": ["release_notes"],
+  "version_keywords": ["версия", "версии", "появил", "выпуск", "release", "начиная с"],
+  "tools": {
+    "versions": "get_doc_versions",
+    "search": "search",
+    "document": "get_document"
+  }
+}

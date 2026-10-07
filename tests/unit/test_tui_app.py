@@ -51,6 +51,7 @@ def tui(repo: Path, recording_console, history_path: Path, monkeypatch, mcp_fact
         client=client,
         history=HistoryManager(path=history_path),
         mcp_client_factory=mcp_factory,
+        docs_retriever=None,  # поиск по документации проверяется отдельными тестами
     )
     return DevAssistantTUI(session=session, console=recording_console.console, typing_delay=0.0)
 
@@ -180,3 +181,34 @@ def without_environment_override(monkeypatch):
     """Снимает тестовый сторож из conftest: здесь проверяется настоящий реестр домена."""
     for name in ("FFAI_MCP_COMMAND", "FFAI_MCP_ARGS", "FFAI_MCP_URL"):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_sources_line_lists_delivered_fragments(tui, recording_console, docs_retriever, docs_fragment):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(
+        query="вопрос", fragments=(docs_fragment,), version="5.2.1"
+    )
+    tui.session._agent.docs_retriever = docs_retriever
+    tui._ask("как получить координаты?")
+    assert recording_console.contains("📚 Источники (документация 5.2.1)")
+    assert recording_console.contains(docs_fragment.identifier)
+    assert recording_console.contains("раздел docs")
+
+
+def test_docs_journal_reports_unavailable_and_replacement(tui, recording_console, docs_retriever):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="вопрос", status="unavailable", error="нет сети")
+    tui.session._agent.docs_retriever = docs_retriever
+    tui._ask("вопрос")
+    assert recording_console.contains("Документация портала недоступна: нет сети")
+
+
+def test_docs_journal_reports_empty_search(tui, recording_console, docs_retriever):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="вопрос", status="no_candidates")
+    tui.session._agent.docs_retriever = docs_retriever
+    tui._ask("вопрос")
+    assert recording_console.contains("ничего не найдено")

@@ -61,6 +61,9 @@ def repo(tmp_path: Path) -> Path:
 
 def _session(repo: Path, **kwargs) -> AssistantSession:
     kwargs.setdefault("client", FakeClient())
+    # Поиск по документации по умолчанию выключен: тест, который его проверяет, передаёт свой
+    # ретривер, а остальные не должны ни ходить в сеть, ни поднимать серверы.
+    kwargs.setdefault("docs_retriever", None)
     return AssistantSession(root=repo, **kwargs)
 
 
@@ -394,3 +397,83 @@ def test_tool_arguments_split_quotes_fall_back_gracefully(repo: Path, mcp_factor
     session.connect_mcp_servers()
     result = session.run_command('/tool call fake_echo message="незакрытая кавычка')
     assert not result.unknown
+
+
+# --- документация портала: режим, версия, отчёт ----------------------------------------------
+
+
+def test_docs_lines_show_state_and_fragments(repo: Path, docs_retriever, docs_fragment):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="координаты", fragments=(docs_fragment,))
+    session = _session(repo, docs_retriever=docs_retriever)
+    session.ask("как получить координаты?")
+    lines = "\n".join(session.docs_lines())
+    assert "координаты" in lines
+    assert "Состояние: ok" in lines
+    assert docs_fragment.identifier in lines
+    assert "Доставлено фрагментов: 1" in lines
+
+
+def test_docs_report_is_available_without_a_question(repo: Path, docs_retriever):
+    session = _session(repo, docs_retriever=docs_retriever)
+    assert "Поиска ещё не было" in session.docs_lines()[0]
+
+
+def test_docs_mode_off_disables_search_and_check(repo: Path, docs_retriever, docs_fragment):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="вопрос", fragments=(docs_fragment,))
+    session = _session(repo, docs_retriever=docs_retriever)
+    result = session.run_command("/docs mode off")
+    assert "выключен" in result.lines[0]
+    assert not session.docs_enabled
+    assert "выключен" in session.docs_lines()[0]
+
+    session.ask("вопрос")
+    assert docs_retriever.queries == [], "выключенный режим не ищет"
+
+    session.run_command("/docs mode on")
+    session.ask("вопрос")
+    assert len(docs_retriever.queries) == 1
+
+
+def test_docs_version_command_sets_the_retriever(repo: Path, docs_retriever):
+    session = _session(repo, docs_retriever=docs_retriever)
+    result = session.run_command("/docs version 5.1.5")
+    assert "5.1.5" in result.lines[0]
+    assert docs_retriever.version == "5.1.5"
+    assert docs_retriever.refreshes == 1, "смена версии сбрасывает список версий"
+    session.ask("вопрос")
+    assert docs_retriever.queries[-1] == ("вопрос", "5.1.5"), "поиск идёт по заданной версии"
+
+    empty = session.run_command("/docs version")
+    assert "актуальная" in empty.lines[0]
+
+
+def test_docs_command_reports_without_model_requests(repo: Path, docs_retriever):
+    client = FakeClient()
+    session = _session(repo, client=client, docs_retriever=docs_retriever)
+    session.run_command("/docs")
+    session.run_command("/docs trace")
+    session.ask("вопрос")
+    session.run_command("/docs")
+    assert len(client.calls) == 1, "отчёты не обращаются к модели"
+
+
+def test_docs_mode_form_is_checked(repo: Path, docs_retriever):
+    session = _session(repo, docs_retriever=docs_retriever)
+    result = session.run_command("/docs mode может")
+    assert "Форма" in result.lines[0]
+    assert session.docs_enabled
+
+
+def test_citations_snapshot_is_exposed(repo: Path, docs_retriever, docs_fragment):
+    from tests.conftest import FakeDocsReport
+
+    docs_retriever.report = FakeDocsReport(query="вопрос", fragments=(docs_fragment,))
+    session = _session(repo, docs_retriever=docs_retriever)
+    session.ask("вопрос")
+    check = session.last_citations
+    assert check is not None and not check.confirmed
+    assert check.replaced

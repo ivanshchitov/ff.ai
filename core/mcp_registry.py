@@ -140,7 +140,7 @@ def _override_from_environment() -> Optional[Tuple[MCPServerSpec, ...]]:
     command = os.getenv("FFAI_MCP_COMMAND", "").strip()
     if url:
         spec = MCPServerSpec(
-            name="из окружения",
+            name=config.MCP_OVERRIDE_NAME,
             transport=TRANSPORT_HTTP,
             url=url,
             description="сервер, заданный переменной FFAI_MCP_URL",
@@ -151,7 +151,7 @@ def _override_from_environment() -> Optional[Tuple[MCPServerSpec, ...]]:
     if command:
         args = tuple(part for part in os.getenv("FFAI_MCP_ARGS", "").split(" ") if part)
         spec = MCPServerSpec(
-            name="из окружения",
+            name=config.MCP_OVERRIDE_NAME,
             transport=TRANSPORT_STDIO,
             command=command,
             args=args,
