@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+# Пакеты core/ и ui/ импортируются от корня репозитория: точка входа
+# ff-ai.py содержит дефис и модулем не является, поэтому добавить корень
+# в sys.path через неё невозможно.
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "pty: тесты, которым нужен настоящий псевдотерминал (Unix)",
+    "e2e: полный прогон приложения через псевдотерминал против stub-сервера",
+    "network: обращение к внешним сервисам — MCP-сервер документации портала, облачный API",
+]
+addopts = "-m 'not network'"
+filterwarnings = ["error::DeprecationWarning:core.*", "error::DeprecationWarning:ui.*"]
+
+[tool.coverage.run]
+source = ["core", "ui"]

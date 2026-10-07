@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "aurora-qt5",
+  "title": "Разработка приложений под ОС Аврора (Qt 5.6)",
+  "platform": "Qt 5.6 / ОС Аврора",
+  "docs_version": "5.2.1",
+  "local_sdk_version": "5.1.5.105-mb2",
+  "responses_language": "ru",
+  "markers": [
+    {"glob": "rpm/*.spec"},
+    {"glob": "*.spec"},
+    {"glob": "*.pro", "contains": "QT"},
+    {"glob": "*.qml"},
+    {"glob": "CMakeLists.txt", "contains": "Qt5"}
+  ]
+}

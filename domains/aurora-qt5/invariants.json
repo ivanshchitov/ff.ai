@@ -1,0 +1,73 @@
+{
+  "sources": {
+    "public_api": "doc/software_development/reference/public_api",
+    "spec": "doc/software_development/guidelines/rpm_requirements/spec_requirements",
+    "desktop": "doc/software_development/guidelines/rpm_requirements/desktop_requirements",
+    "sign": "doc/sdk/tools/rpmsign_external",
+    "mb2": "doc/sdk/tools/mb2",
+    "validator": "doc/sdk/tools/rpm_validator",
+    "qt": "doc/platform/architecture/qt"
+  },
+  "invariants": [
+    {
+      "number": 1,
+      "rule": "Только модули, библиотеки и разрешения из таблицы публичных API платформы",
+      "forbidden": [],
+      "source": "public_api"
+    },
+    {
+      "number": 2,
+      "rule": "QtWidgets не используется: интерфейс строится на Qt Quick и Silica",
+      "forbidden": ["qtwidgets", "qt += widgets", "qapplication"],
+      "source": "public_api"
+    },
+    {
+      "number": 3,
+      "rule": "Только Qt 5.6: никаких Qt 6 и его сборочных идиом",
+      "forbidden": ["qt6", "qt_add_dbus_interface", "extra-cmake-modules", "ecm_feature_summary"],
+      "source": "qt"
+    },
+    {
+      "number": 4,
+      "rule": "Состав SDK, целей сборки и тулинга не меняется — это ручная работа пользователя",
+      "forbidden": ["sfdk maintain", "sdkmaintenancetool", "maintenancetool", "sdk-assistant target create", "sdk-assistant target update", "sdk-assistant target remove", "sdk-assistant tooling", "sfdk tools install", "sfdk tools update", "sfdk tools remove", "sfdk tools create"],
+      "source": "mb2"
+    },
+    {
+      "number": 5,
+      "rule": ".spec соответствует требованиям: Name совпадает с именем файла, Epoch не используется, %files перечисляет конкретные пути, на macOS и Windows указан %defattr",
+      "forbidden": [],
+      "source": "spec"
+    },
+    {
+      "number": 6,
+      "rule": "На устройство ставится только подписанный пакет: подпись проверяется по строкам вывода rpmsign-external dump, а не по коду возврата",
+      "forbidden": [],
+      "source": "sign"
+    },
+    {
+      "number": 7,
+      "rule": "Разрешения объявлены в обязательном разделе [X-Application] файла .desktop и совпадают с используемыми API",
+      "forbidden": [],
+      "source": "desktop"
+    },
+    {
+      "number": 8,
+      "rule": "Ключи и сертификаты подписи не попадают в репозиторий, в вывод и в логи",
+      "forbidden": ["-----begin", "regular_key", "regular_cert", ".pem", ".key"],
+      "source": "sign"
+    },
+    {
+      "number": 9,
+      "rule": "Файлы репозитория не переписываются ради состояния инструмента: .gitignore не правится, состояние живёт в .aurora через .git/info/exclude",
+      "forbidden": [],
+      "source": "mb2"
+    },
+    {
+      "number": 10,
+      "rule": "Платформенный факт приводится со ссылкой на документацию портала и с указанием версии",
+      "forbidden": [],
+      "source": "qt"
+    }
+  ]
+}
