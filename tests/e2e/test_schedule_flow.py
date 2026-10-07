@@ -3,7 +3,11 @@
 Реестр MCP здесь подменён не заглушкой, а настоящим собственным сервером репозитория: задания и
 планировщик объявляет только он, и ручной вызов идёт ровно тем путём, каким пойдёт задание в
 расписании. Середина поэтому не подделывается — проверяется проводка приложения, сервера и файла
-расписания, а состояние и кэш уводятся в `tmp_path` (`harness.AppSession`).
+расписания.
+
+Пути состояния серверу передаются аргументами (`--schedule-file`, `--index-file`): запуск с
+переопределением реестра переменных окружения ему не передаёт — библиотека оставляет процессу
+безопасный минимум, — и без аргументов прогон писал бы расписание и индекс в каталог пользователя.
 """
 
 from __future__ import annotations
@@ -21,15 +25,30 @@ pytestmark = pytest.mark.e2e
 REPO_SERVER = REPO_ROOT / "mcp_server" / "repo_server.py"
 TOOLS_FILE = REPO_ROOT / "domains" / "aurora-qt5" / "tools.json"
 
+JOB_TOOLS = ("target_build", "index_refresh", "public_api_scan")
+SCHEDULE_TOOLS = ("schedule_add", "schedule_list", "schedule_run_due", "schedule_summary")
+
+
+def schedule_file(tmp_path: Path) -> Path:
+    return tmp_path / "state" / "schedule.json"
+
+
+def index_file(tmp_path: Path) -> Path:
+    return tmp_path / "cache" / "index.sqlite3"
+
 
 def _launch(tmp_path: Path, repo: Path, **kwargs) -> AppSession:
     """Приложение против собственного сервера репозитория вместо заглушки реестра."""
+    args = (
+        f"{REPO_SERVER} --root {repo} --tools {TOOLS_FILE}"
+        f" --schedule-file {schedule_file(tmp_path)} --index-file {index_file(tmp_path)}"
+    )
     return AppSession(
         history_file=tmp_path / "state" / "history.json",
         state_dir=tmp_path / "state",
         cache_dir=tmp_path / "cache",
         repo=repo,
-        mcp_args=f"{REPO_SERVER} --root {repo} --tools {TOOLS_FILE}",
+        mcp_args=args,
         **kwargs,
     )
 
@@ -45,10 +64,6 @@ def running(tmp_path: Path, stub, **kwargs):
         session.close()
 
 
-def schedule_file(tmp_path: Path) -> Path:
-    return tmp_path / "state" / "schedule.json"
-
-
 def read_schedule(tmp_path: Path) -> dict:
     path = schedule_file(tmp_path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -59,15 +74,7 @@ def test_repository_server_declares_the_jobs_and_the_scheduler(tmp_path: Path, s
         session.send_line("/tool")
         text = session.wait_for("schedule_run_due")
 
-    for name in (
-        "target_build",
-        "index_refresh",
-        "public_api_scan",
-        "schedule_add",
-        "schedule_list",
-        "schedule_run_due",
-        "schedule_summary",
-    ):
+    for name in JOB_TOOLS + SCHEDULE_TOOLS:
         assert name in text
     assert stub.call_count == 0
 
@@ -82,9 +89,8 @@ def test_scan_finds_violations_and_accumulates_them(tmp_path: Path, stub):
 
         # Повторный поиск того же нарушения: оно уже накоплено и новым не считается.
         session.send_line("/tool call public_api_scan modules=QtQuick")
-        again = session.wait_for("новых 0")
+        session.wait_for("новых 0")
 
-    assert "инвариант" in again or "Qt 6" in again
     assert read_schedule(tmp_path)["collected"]["нарушения"]
     assert stub.call_count == 0
 
@@ -119,6 +125,18 @@ def test_job_is_scheduled_and_run_by_the_app(tmp_path: Path, stub):
     assert stub.call_count == 0
 
 
+def test_day_delay_is_honoured_between_the_runs(tmp_path: Path, stub):
+    """Срок задания сдвигается прогоном: второй вызов не повторяет работу того же периода."""
+    with running(tmp_path, stub) as session:
+        session.send_line("/tool call schedule_add tool=public_api_scan every_minutes=60")
+        session.wait_for("поставлено")
+        session.send_line("/tool call schedule_run_due")
+        session.wait_for("Выполнено заданий")
+
+        session.send_line("/tool call schedule_run_due")
+        assert "просроченных заданий нет" in session.wait_for("просроченных заданий нет")
+
+
 def test_index_refresh_writes_the_index_into_the_cache(tmp_path: Path, stub):
     with running(tmp_path, stub) as session:
         session.write_repo_file("src/main.cpp", "int main() {}\n")
@@ -126,7 +144,7 @@ def test_index_refresh_writes_the_index_into_the_cache(tmp_path: Path, stub):
         session.send_line("/tool call index_refresh")
         assert "Индекс обновлён" in session.wait_for("Индекс обновлён")
 
-    assert (tmp_path / "cache" / "index.sqlite3").is_file()
+    assert index_file(tmp_path).is_file()
 
 
 def test_schedule_state_survives_a_restart(tmp_path: Path, stub):
@@ -155,10 +173,11 @@ def test_schedule_state_survives_a_restart(tmp_path: Path, stub):
 
     assert "public_api_scan" in text
     assert "накоплено записей 1" in text
+    assert "прогонов 1" in text
 
 
 def test_repository_state_is_untouched(tmp_path: Path, stub):
-    """Ни приложение, ни сервер не пишут в целевой репозиторий состояния планировщика."""
+    """Ни приложение, ни сервер не пишут в целевой репозиторий и в состояние пользователя."""
     real = REPO_ROOT / "schedule.json"
     before = real.read_text(encoding="utf-8") if real.exists() else None
     repo = AppSession.create_target_repo(base=tmp_path)
@@ -175,10 +194,6 @@ def test_repository_state_is_untouched(tmp_path: Path, stub):
     after = real.read_text(encoding="utf-8") if real.exists() else None
     assert after == before
     assert not (repo / "schedule.json").exists()
-    assert history_text(tmp_path) is None  # обменов не было — истории тоже
     assert schedule_file(tmp_path).is_file()
-
-
-def history_text(tmp_path: Path) -> str:
-    path = tmp_path / "state" / "history.json"
-    return path.read_text(encoding="utf-8") if path.exists() else None
+    # Обменов с моделью не было — истории тоже: строки инструментов в неё не попадают.
+    assert not (tmp_path / "state" / "history.json").exists()

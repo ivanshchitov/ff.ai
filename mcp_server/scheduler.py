@@ -91,6 +91,9 @@ class Scheduler:
 
     def call_result(self, name: str, arguments: Dict[str, Any]) -> Tuple[bool, str]:
         """То же, но с признаком успеха: по нему сервер ставит протокольный признак ошибки."""
+        # Файл общий для приложения и фонового исполнителя: состояние перечитывается перед каждым
+        # вызовом, иначе запись одного процесса затёрла бы работу другого.
+        self.store.reload()
         handlers = {
             SCHEDULE_ADD: self._add,
             SCHEDULE_LIST: self._list,
@@ -320,7 +323,7 @@ def target_build(
             shown = "код возврата неизвестен" if code is None else f"код возврата {code}"
             raise ToolsError(
                 f"Сборка цели не завершена: команда «{step}» — {shown}.\n"
-                + "\n".join(lines + [f"- {step}: отказ"])
+                + "\n".join(lines)
                 + f"\n{report}"
             )
         lines.append(f"- {step}: ок")
@@ -392,6 +395,8 @@ def public_api_scan(
             unreadable.append(relative)
             continue
         for number, line in enumerate(text.splitlines(), 1):
+            # Одно сработавшее правило на строку: иначе строка с двумя запретами заняла бы две
+            # записи в отчёте и в накопленном, а значит и дважды считалась бы новой.
             for reason in _rule_reasons(line, rules):
                 violations.append(f"{relative}:{number}: {reason} — {_clip(line.strip())}")
                 break

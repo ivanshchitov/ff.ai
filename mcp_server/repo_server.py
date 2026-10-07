@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -54,6 +55,10 @@ SERVER_INSTRUCTIONS = (
 
 _root: Optional[Path] = None
 _tools_path: Optional[Path] = None
+# Путь файла расписания, если он задан аргументом: переопределение реестра переменными окружения
+# серверу переменных не передаёт (SDK оставляет процессу безопасный минимум: HOME, PATH, TERM),
+# поэтому прогон с FFAI_MCP_ARGS иначе писал бы расписание в каталог состояния пользователя.
+_schedule_path: Optional[Path] = None
 _context: Optional[RepoContext] = None
 _tools_error: Optional[str] = None
 # Планировщик, его хранилище и правила пакета домена создаются при первом обращении: сервер
@@ -127,10 +132,10 @@ def _package_domain() -> Optional[domains.Domain]:
 
 
 def _schedule_store() -> ScheduleStore:
-    """Хранилище планировщика: путь берётся из `config` в момент первого обращения."""
+    """Хранилище планировщика: путь берётся при первом обращении, а не при импорте модуля."""
     global _store
     if _store is None:
-        _store = ScheduleStore()
+        _store = ScheduleStore(path=_schedule_path)
     return _store
 
 
@@ -374,7 +379,33 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         default="",
         help="файл белых списков команд и git-подкоманд (tools.json пакета домена)",
     )
+    parser.add_argument(
+        "--schedule-file",
+        default="",
+        help="файл планировщика; по умолчанию — путь состояния ff.ai",
+    )
+    parser.add_argument(
+        "--index-file",
+        default="",
+        help="файл индекса кода; по умолчанию — кэш по хешу пути репозитория",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
+
+
+def _apply_state_paths(schedule_file: str, index_file: str) -> None:
+    """Пути состояния, заданные аргументами запуска.
+
+    Механизм тот же, что у переменных `FFAI_*`, но приходит аргументом: запуск с переопределением
+    реестра (`FFAI_MCP_COMMAND`/`FFAI_MCP_ARGS`) серверу переменных окружения не передаёт — SDK
+    оставляет процессу безопасный минимум, — и без аргумента прогон писал бы расписание и индекс
+    в каталог состояния пользователя. Файл расписания читается при первом обращении к планировщику,
+    файл индекса — при выполнении задания, поэтому обоих достаточно выставить до первого вызова.
+    """
+    global _schedule_path
+    if schedule_file.strip():
+        _schedule_path = Path(schedule_file).expanduser()
+    if index_file.strip():
+        os.environ["FFAI_INDEX_FILE"] = str(Path(index_file).expanduser())
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -393,6 +424,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"repo_server: {exc}", file=sys.stderr)
         return 2
     _tools_path = Path(args.tools).expanduser() if args.tools.strip() else None
+    _apply_state_paths(args.schedule_file, args.index_file)
     server.run(transport="stdio")
     return 0
 

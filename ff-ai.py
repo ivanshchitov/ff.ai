@@ -43,6 +43,14 @@ def parse_args(argv) -> argparse.Namespace:
     )
     parser.add_argument("--repo", default="", help="целевой репозиторий (по умолчанию текущий каталог)")
     parser.add_argument("--domain", default="", help="пакет домена; по умолчанию — по маркерам репозитория")
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="поднять тонкий web-фронтенд вместо консольного интерфейса",
+    )
+    parser.add_argument("--web-host", default="127.0.0.1", help="адрес web-сервера")
+    parser.add_argument("--web-port", type=int, default=8000, help="порт web-сервера")
+    parser.add_argument("--web-base-url", default="", help="внешний префикс адреса, если нужен")
     parser.add_argument("--version", action="store_true", help="показать версию и выйти")
     return parser.parse_args(argv)
 
@@ -119,6 +127,13 @@ def main(argv=None) -> int:
         print(f"Ошибка домена: {error}", file=sys.stderr)
         return 2
 
+    if args.web:
+        # Web-режим ведёт свою сессию, а жизненный цикл локального сервера остаётся у TUI-пути:
+        # в браузере локальная модель работает через тот же фасад, что и в терминале.
+        from web.app import serve
+
+        serve(session, host=args.web_host, port=args.web_port, base_url=args.web_base_url)
+        return 0
     return _run_with_local_server(DevAssistantTUI(session=session))
 
 

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ff.ai</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<header>
+  <h1>ff.ai</h1>
+  <div id="status">Загрузка состояния…</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Вопрос</h2>
+    <form id="ask-form">
+      <input id="question" type="text" autocomplete="off" placeholder="Вопрос по репозиторию или платформе">
+      <button class="primary" type="submit">Спросить</button>
+    </form>
+    <p id="phase" class="phase"></p>
+  </section>
+
+  <section class="panel">
+    <h2>Ответ</h2>
+    <div id="answer" class="answer empty">Ответа пока нет.</div>
+    <div id="usage" class="usage"></div>
+    <h3>Источники</h3>
+    <div id="sources" class="sources empty">—</div>
+    <div id="citations" class="citations"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Задача</h2>
+    <div class="controls">
+      <button data-task="run">Запустить прогон</button>
+      <button data-task="pause">Пауза</button>
+      <button data-task="resume">Продолжить</button>
+      <button data-report="task">Обновить</button>
+    </div>
+    <div id="task" class="task empty">Задач нет.</div>
+    <div id="edits" class="hidden">
+      <h3>Правки плана</h3>
+      <form id="edits-form">
+        <input id="edits-input" type="text" autocomplete="off" placeholder="Пустая строка — выполнять план как есть">
+        <button type="submit">Отправить</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Подтверждения</h2>
+    <div id="confirmations" class="confirmations empty">Запросов нет.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Команда</h2>
+    <form id="command-form">
+      <input id="command" type="text" autocomplete="off" placeholder="/context, /task add …, /ops status">
+      <button type="submit">Выполнить</button>
+    </form>
+    <pre id="command-out" class="lines empty">—</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Отчёты</h2>
+    <div class="reports">
+      <button data-report="docs">Документация</button>
+      <button data-report="code">Код</button>
+      <button data-report="tool">Инструменты</button>
+      <button data-report="ops">Операции</button>
+      <button data-report="memory">Память</button>
+      <button data-report="profile">Профиль</button>
+      <button data-report="invariants">Правила</button>
+      <button data-report="context">Контекст</button>
+      <button data-report="usage">Расход</button>
+    </div>
+    <pre id="report" class="lines empty">—</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Журнал и события</h2>
+    <pre id="events" class="lines empty">—</pre>
+  </section>
+</main>
+
+<script src="static/app.js"></script>
+</body>
+</html>
