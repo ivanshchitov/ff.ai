@@ -31,6 +31,8 @@ class RequestPhase(Enum):
     REQUEST = "request"
     COMPRESSION = "compression"
     FACTS_UPDATE = "facts_update"
+    MCP_CONNECT = "mcp_connect"
+    MCP_TOOL = "mcp_tool"
 
 
 @dataclass

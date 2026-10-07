@@ -1,0 +1,20 @@
+{
+  "run": {
+    "allowed": [
+      "qmake",
+      "cmake",
+      "ninja",
+      "make",
+      "mb2",
+      "sfdk build",
+      "sfdk config target=",
+      "sfdk tools list",
+      "sfdk engine exec rpmsign-external",
+      "rpmsign-external",
+      "rpm-validator"
+    ]
+  },
+  "git": {
+    "allowed": ["status", "log", "show", "diff", "blame", "ls-files"]
+  }
+}

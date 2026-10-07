@@ -11,6 +11,7 @@ from core.agent import RequestPhase
 from core.answer_settings import AnswerFormat
 from core.api_client import APIError, AnswerMeta
 from core.history_manager import HistoryManager
+from core.mcp_client import MCPError
 from core.session import AnswerReady, AssistantSession, JournalLine, PhaseChanged
 
 
@@ -249,3 +250,147 @@ def test_settings_and_model_are_session_state(repo: Path):
     assert session.model == config.AVAILABLE_MODELS[1]
     session.ask("вопрос")
     assert "дифф" in client.calls[0]["messages"][0]["content"].lower()
+
+
+# --- MCP: обход реестра, отчёт, ручной вызов ------------------------------------------------
+
+
+def test_sweep_fills_the_report(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    connections = session.connect_mcp_servers()
+    assert [connection.available for connection in connections] == [True, True]
+    assert len(session.mcp_report()) == 2
+    assert len(mcp_factory.specs) == 2
+    summary = session.mcp_summary()
+    assert "MCP: 2/2 серверов" in summary and "инструментов" in summary
+
+
+def test_sweep_reports_phases(repo: Path, mcp_factory):
+    events = []
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.subscribe(events.append)
+    session.connect_mcp_servers()
+    phases = [event.phase for event in events if isinstance(event, PhaseChanged)]
+    assert RequestPhase.MCP_CONNECT in phases
+
+
+def test_unavailable_server_is_counted_and_does_not_stop_the_sweep(repo: Path):
+    from tests.conftest import FakeMCPFactory
+
+    factory = FakeMCPFactory(error="нет связи", error_for=("repo",))
+    session = _session(repo, mcp_client_factory=factory)
+    session.connect_mcp_servers()
+    assert "1/2" in session.mcp_summary()
+    assert "1 недоступно" in session.mcp_summary()
+    lines = "\n".join(session.mcp_lines())
+    assert "недоступен: нет связи" in lines
+    assert "fake_echo" in lines  # живой сервер всё равно описан
+
+
+def test_mcp_reports_do_not_touch_the_model(repo: Path, mcp_factory):
+    client = FakeClient()
+    session = _session(repo, client=client, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    session.run_command("/mcp")
+    session.run_command("/tool")
+    session.run_command("/tool call fake_echo message=привет")
+    assert client.calls == []
+
+
+def test_tool_listing_and_manual_call(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    listing = "\n".join(session.tool_lines())
+    assert "fake_echo" in listing and "параметры:" in listing
+
+    result = session.call_mcp_tool("fake_echo", {"message": "привет"})
+    assert result.arguments == {"message": "привет"}
+    assert "ответ инструмента fake_echo" in result.text
+    assert mcp_factory.calls == [("fake_echo", {"message": "привет"})]
+
+
+def test_unknown_tool_is_reported_without_starting_servers(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    before = len(mcp_factory.specs)
+    with pytest.raises(MCPError) as error:
+        session.call_mcp_tool("которого-нет")
+    assert "которого-нет" in str(error.value)
+    assert "fake_echo" in str(error.value)  # перечисляем, что доступно
+    assert len(mcp_factory.specs) == before
+
+
+def test_tool_command_shapes_and_error_paths(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+
+    called = session.run_command("/tool call fake_echo message=привет")
+    assert any("ответ инструмента fake_echo" in line for line in called.lines)
+
+    unknown = session.run_command("/tool call которого-нет")
+    assert not unknown.unknown
+    assert "не вызван" in unknown.lines[0]
+
+    malformed = session.run_command("/tool call fake_echo без-равенства")
+    assert "ключ=значение" in malformed.lines[0]
+
+    wrong_form = session.run_command("/tool дерни")
+    assert "Форма команды" in wrong_form.lines[0]
+
+
+def test_tool_error_result_is_data_not_exception(repo: Path):
+    """Отказ инструмента — строка отчёта, а не исключение, ломающее сессию."""
+    from core.mcp_client import MCPCallResult
+    from tests.conftest import FakeMCPFactory
+
+    factory = FakeMCPFactory(
+        call_result=MCPCallResult(
+            server="repo",
+            tool="fake_echo",
+            arguments={},
+            text="файл не найден",
+            is_error=True,
+        )
+    )
+    session = _session(repo, mcp_client_factory=factory)
+    session.connect_mcp_servers()
+    result = session.run_command("/tool call fake_echo message=привет")
+    assert "вернул ошибку" in result.lines[0]
+    assert "файл не найден" in result.lines[1]
+
+
+def test_refresh_walks_the_registry_again(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    first = len(mcp_factory.specs)
+    session.run_command("/mcp refresh")
+    assert len(mcp_factory.specs) == first * 2
+
+
+def test_mcp_snapshot_is_a_tuple(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    assert isinstance(session.mcp_report(), tuple)
+    assert session.mcp_report()
+
+
+@pytest.fixture(autouse=True)
+def without_environment_override(monkeypatch):
+    """Снимает тестовый сторож из conftest: здесь проверяется настоящий реестр домена."""
+    for name in ("FFAI_MCP_COMMAND", "FFAI_MCP_ARGS", "FFAI_MCP_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_tool_arguments_support_quoted_values(repo: Path, mcp_factory):
+    """Значение с пробелами берётся в кавычки — иначе поисковый запрос не набрать."""
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    session.run_command('/tool call fake_echo message="как собрать пакет под aarch64"')
+    assert mcp_factory.calls[-1] == ("fake_echo", {"message": "как собрать пакет под aarch64"})
+
+
+def test_tool_arguments_split_quotes_fall_back_gracefully(repo: Path, mcp_factory):
+    session = _session(repo, mcp_client_factory=mcp_factory)
+    session.connect_mcp_servers()
+    result = session.run_command('/tool call fake_echo message="незакрытая кавычка')
+    assert not result.unknown

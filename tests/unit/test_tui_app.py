@@ -41,13 +41,16 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tui(repo: Path, recording_console, history_path: Path, monkeypatch):
+def tui(repo: Path, recording_console, history_path: Path, monkeypatch, mcp_factory):
     # Ключ задан, иначе интерфейс спросит его у stdin — а stdin занят pytest.
     monkeypatch.setenv("OPENCODE_API_KEY", "sk-test-key")
     monkeypatch.setattr(config, "_api_key_runtime", None, raising=False)
     client = FakeClient()
     session = AssistantSession(
-        root=repo, client=client, history=HistoryManager(path=history_path)
+        root=repo,
+        client=client,
+        history=HistoryManager(path=history_path),
+        mcp_client_factory=mcp_factory,
     )
     return DevAssistantTUI(session=session, console=recording_console.console, typing_delay=0.0)
 
@@ -143,3 +146,37 @@ def test_keyboard_interrupt_exits_cleanly(tui, recording_console, monkeypatch):
     )
     assert tui.run() == 0
     assert recording_console.contains("До связи")
+
+
+def test_mcp_and_tool_commands_are_printed(tui, recording_console):
+    tui.session.connect_mcp_servers()
+    tui._handle_command("/mcp")
+    assert recording_console.contains("aurora-docs")
+    assert recording_console.contains("fake_echo")
+    assert recording_console.contains("протокол:")
+
+    tui._handle_command("/tool")
+    assert recording_console.contains("параметры: message")
+
+    tui._handle_command("/tool call fake_echo message=привет")
+    assert recording_console.contains("ответ инструмента fake_echo")
+    assert tui.session.session_usage.requests == 0
+
+
+def test_tool_call_error_is_reported_not_raised(tui, recording_console):
+    tui.session.connect_mcp_servers()
+    tui._handle_command("/tool call которого-нет")
+    assert recording_console.contains("не вызван")
+
+
+def test_startup_summary_line_names_servers_and_tools(tui, recording_console):
+    tui._print_mcp_summary()
+    assert recording_console.contains("MCP: 2/2 серверов")
+    assert recording_console.contains("/mcp")
+
+
+@pytest.fixture(autouse=True)
+def without_environment_override(monkeypatch):
+    """Снимает тестовый сторож из conftest: здесь проверяется настоящий реестр домена."""
+    for name in ("FFAI_MCP_COMMAND", "FFAI_MCP_ARGS", "FFAI_MCP_URL"):
+        monkeypatch.delenv(name, raising=False)

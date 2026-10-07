@@ -50,6 +50,13 @@ def isolated_state(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("FFAI_TASKS_DIR", str(state / "tasks"))
     monkeypatch.setenv("FFAI_EXPORTS_DIR", str(state / "reports"))
     monkeypatch.delenv("FFAI_INDEX_FILE", raising=False)
+    # Обход реестра MCP в тестах всегда идёт на локальную заглушку: без этого любой прогон,
+    # дотянувшийся до стартовой сводки, поднимал бы сервер документации портала.
+    monkeypatch.setenv("FFAI_MCP_COMMAND", "python3")
+    monkeypatch.setenv(
+        "FFAI_MCP_ARGS", str(Path(__file__).resolve().parent / "fake_mcp_server.py")
+    )
+    monkeypatch.delenv("FFAI_MCP_URL", raising=False)
     importlib.reload(config)
     importlib.reload(prompts)
     yield state
@@ -138,3 +145,99 @@ def pytest_addoption(parser):
             "screen — печатать итоговый экран. Требует -s, иначе pytest перехватит вывод."
         ),
     )
+
+
+class FakeMCPClient:
+    """Клиент MCP без процессов: отдаёт заранее заданный снимок и записывает вызовы."""
+
+    def __init__(
+        self,
+        spec,
+        tools=("fake_echo",),
+        error: str = None,
+        server_name: str = None,
+        call_result=None,
+    ) -> None:
+        self.spec = spec
+        self.tools = tuple(tools)
+        self.error = error
+        self.server_name = server_name if server_name is not None else spec.name
+        self.call_result = call_result
+        self.calls = []
+
+    def connect(self):
+        from core.mcp_client import MCPConnection, MCPTool
+
+        if self.error is not None:
+            return MCPConnection(error=self.error, transport=self.spec.transport, target=self.spec.target)
+        return MCPConnection(
+            server_name=self.server_name,
+            server_version="9.9.9",
+            protocol_version="2025-03-26",
+            tools=tuple(
+                MCPTool(
+                    name=name,
+                    description=f"инструмент {name}",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "description": "сообщение"}},
+                        "required": ["message"],
+                    },
+                )
+                for name in self.tools
+            ),
+            transport=self.spec.transport,
+            target=self.spec.target,
+        )
+
+    def call_tool(self, tool, arguments=None):
+        from core.mcp_client import MCPCallResult
+
+        self.calls.append((tool, dict(arguments or {})))
+        if self.call_result is not None:
+            return self.call_result
+        return MCPCallResult(
+            server=self.server_name,
+            tool=tool,
+            arguments=dict(arguments or {}),
+            text=f"ответ инструмента {tool}",
+        )
+
+
+class FakeMCPFactory:
+    """Фабрика клиентов: по каждой записи реестра — свой предсказуемый клиент."""
+
+    def __init__(
+        self,
+        tools=("fake_echo",),
+        error: str = None,
+        error_for=(),
+        call_result=None,
+    ) -> None:
+        self.tools = tools
+        self.error = error
+        self.error_for = tuple(error_for)
+        self.call_result = call_result
+        self.specs = []
+        self.clients = []
+
+    def __call__(self, spec):
+        self.specs.append(spec)
+        client = FakeMCPClient(
+            spec,
+            tools=self.tools,
+            error=self.error if (self.error is not None and (not self.error_for or spec.name in self.error_for)) else None,
+            call_result=self.call_result,
+        )
+        self.clients.append(client)
+        return client
+
+    @property
+    def calls(self):
+        """Все ручные вызовы, сделанные через клиентов этой фабрики."""
+        return [call for client in self.clients for call in client.calls]
+
+
+@pytest.fixture
+def mcp_factory():
+    return FakeMCPFactory()

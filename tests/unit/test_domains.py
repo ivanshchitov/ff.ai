@@ -179,3 +179,57 @@ def test_ambiguous_markers_are_refused(tmp_path: Path):
     (repo / "thing.probe").write_text("", encoding="utf-8")
     with pytest.raises(DomainError):
         domains.detect_domain(repo, tmp_path)
+
+
+def test_bundled_domain_declares_the_portal_server():
+    """Сервер документации портала — данные пакета, а не код: так его и проверяем."""
+    domain = load_domain("aurora-qt5")
+    assert len(domain.servers) == 1
+    server = domain.servers[0]
+    assert server.transport == "http"
+    assert server.url.startswith("https://")
+    assert server.health_tool, "у сервера должен быть объявлен инструмент проверки"
+    assert server.source == "домен"
+
+
+def test_bundled_domain_points_at_its_tools_file():
+    domain = load_domain("aurora-qt5")
+    assert domain.tools_path is not None
+    assert domain.tools_path.name == "tools.json"
+    data = json.loads(domain.tools_path.read_text(encoding="utf-8"))
+    assert data["run"]["allowed"], "белый список команд сборки не должен быть пустым"
+    assert data["git"]["allowed"], "белый список git-подкоманд не должен быть пустым"
+
+
+def test_pack_without_servers_is_not_an_error(tmp_path: Path):
+    path = _pack(tmp_path, "local-only")
+    domain = load_domain("local-only", tmp_path)
+    assert domain.servers == ()
+    assert domain.tools_path is None
+    assert path.is_dir()
+
+
+def test_broken_servers_section_names_the_file(tmp_path: Path):
+    path = _pack(tmp_path, "broken")
+    (path / "servers.json").write_text('{"servers": [{"transport": "http"}]}', encoding="utf-8")
+    with pytest.raises(DomainSchemaError) as error:
+        load_domain("broken", tmp_path)
+    assert "servers.json" in str(error.value)
+
+
+def test_servers_section_must_be_a_list(tmp_path: Path):
+    path = _pack(tmp_path, "wrong-shape")
+    (path / "servers.json").write_text('{"servers": {}}', encoding="utf-8")
+    with pytest.raises(DomainSchemaError) as error:
+        load_domain("wrong-shape", tmp_path)
+    assert "servers" in str(error.value)
+
+
+def test_unknown_transport_in_pack_is_refused(tmp_path: Path):
+    path = _pack(tmp_path, "bad-transport")
+    (path / "servers.json").write_text(
+        '{"servers": [{"name": "s", "transport": "smtp"}]}', encoding="utf-8"
+    )
+    with pytest.raises(DomainSchemaError) as error:
+        load_domain("bad-transport", tmp_path)
+    assert "транспорт" in str(error.value)

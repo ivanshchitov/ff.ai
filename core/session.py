@@ -14,14 +14,16 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import config, domains
+from . import config, domains, mcp_registry
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
 from .domains import Domain, DomainError, DomainSelection
 from .history_manager import HistoryManager
+from .mcp_client import MCPCallResult, MCPClient, MCPConnection, MCPError, MCPTool
+from .mcp_registry import MCPServerSpec
 from .usage import SessionUsage
 
 
@@ -58,6 +60,32 @@ class DomainSelected:
     selection: DomainSelection
 
 
+def _split_command_line(text: str) -> List[str]:
+    """Разбор строки команды с поддержкой кавычек; незакрытая кавычка — не повод падать."""
+    import shlex
+
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def parse_tool_arguments(tokens: Sequence[str]) -> Dict[str, str]:
+    """Аргументы ручного вызова: `ключ=значение`, как их удобно набирать в строке.
+
+    Значения не разбираются на типы: сервер объявляет схему и сам решает, что делать с текстом.
+    """
+    arguments: Dict[str, str] = {}
+    for token in tokens:
+        if "=" not in token:
+            raise MCPError(f"аргумент «{token}» задан не как ключ=значение")
+        key, _, value = token.partition("=")
+        if not key.strip():
+            raise MCPError(f"аргумент «{token}» без имени ключа")
+        arguments[key.strip()] = value
+    return arguments
+
+
 @dataclass(frozen=True)
 class Answer:
     """Результат операции «задать вопрос»."""
@@ -89,6 +117,7 @@ class AssistantSession:
         domains_dir: Optional[Path] = None,
         history: Optional[HistoryManager] = None,
         settings: Optional[AnswerSettings] = None,
+        mcp_client_factory: Optional[Callable[[MCPServerSpec], MCPClient]] = None,
     ) -> None:
         self.root = Path(root)
         self._lock = threading.RLock()
@@ -106,6 +135,10 @@ class AssistantSession:
             history=self._history,
         )
         self._domains_dir = domains_dir
+        # Фабрика клиентов MCP: тесты подменяют её, чтобы не поднимать серверные процессы.
+        self._mcp_client_factory = mcp_client_factory or MCPClient
+        self._mcp_specs: Tuple[MCPServerSpec, ...] = ()
+        self._mcp_connections: Tuple[MCPConnection, ...] = ()
 
     # --- доступ к состоянию ---------------------------------------------------------------
 
@@ -242,6 +275,10 @@ class AssistantSession:
                 return CommandResult(command="/usage", lines=self.usage_lines())
             if command == "/domain":
                 return self._domain_command(argument)
+            if command == "/mcp":
+                return self._mcp_command(argument)
+            if command == "/tool":
+                return self._tool_command(argument)
             if command == "/commands":
                 return CommandResult(
                     command="/commands",
@@ -256,6 +293,120 @@ class AssistantSession:
     def context_report(self) -> ContextReport:
         with self._lock:
             return self._agent.context_report()
+
+    # --- MCP: серверы, отчёт, вызов инструмента -------------------------------------------
+
+    def connect_mcp_servers(self) -> Tuple[MCPConnection, ...]:
+        """Обходит реестр и запоминает снимки подключений.
+
+        Соединение каждого сервера живёт ровно этот вызов: наружу уходят только снимки, поэтому
+        отчёт печатается мгновенно и ничего не поднимает заново. Сбой одного сервера остаётся
+        его собственной строкой отчёта и не мешает остальным.
+        """
+        with self._lock:
+            specs = mcp_registry.registry(self.domain, self.root)
+            self._mcp_specs = specs
+            connections = []
+            for spec in specs:
+                self._emit(PhaseChanged(RequestPhase.MCP_CONNECT))
+                connections.append(self._mcp_client_factory(spec).connect())
+            self._mcp_connections = tuple(connections)
+            return self._mcp_connections
+
+    def mcp_report(self) -> Tuple[MCPConnection, ...]:
+        with self._lock:
+            return self._mcp_connections
+
+    def mcp_specs(self) -> Tuple[MCPServerSpec, ...]:
+        with self._lock:
+            return self._mcp_specs
+
+    def mcp_tools(self) -> Tuple[Tuple[str, MCPTool], ...]:
+        """Инструменты всех подключённых серверов: (имя сервера, инструмент)."""
+        return tuple(
+            (connection.server_name or spec_name, tool)
+            for spec_name, connection in zip(
+                (spec.name for spec in self._mcp_specs), self._mcp_connections
+            )
+            for tool in connection.tools
+        )
+
+    def mcp_summary(self) -> str:
+        """Строка стартовой сводки: сколько серверов ответило и сколько инструментов доступно."""
+        total = len(self._mcp_specs)
+        available = sum(1 for connection in self._mcp_connections if connection.available)
+        tools = sum(len(connection.tools) for connection in self._mcp_connections)
+        line = f"MCP: {available}/{total} серверов, {tools} инструментов — подробности: /mcp"
+        if total and available < total:
+            line += f", {total - available} недоступно"
+        return line
+
+    def call_mcp_tool(self, tool: str, arguments: Optional[Dict[str, str]] = None) -> MCPCallResult:
+        """Ручной вызов инструмента: сервер ищется среди подключённых, процессы не поднимаются.
+
+        Если одно имя объявили несколько серверов, берётся первый в порядке реестра; явное
+        указание сервера появится вместе с автовызовом, где выбор делает модель (фаза P5).
+        """
+        with self._lock:
+            spec = self._find_server_with_tool(tool)
+            connection = next(
+                (
+                    item
+                    for item, declared in zip(self._mcp_connections, self._mcp_specs)
+                    if declared.name == spec.name
+                ),
+                None,
+            )
+            if connection is None:
+                raise MCPError(f"сервер «{spec.name}» не подключён — обновите отчёт командой /mcp refresh")
+            self._emit(PhaseChanged(RequestPhase.MCP_TOOL))
+            return self._mcp_client_factory(spec).call_tool(tool, dict(arguments or {}))
+
+    def _find_server_with_tool(self, tool: str) -> MCPServerSpec:
+        declaring = [
+            spec
+            for spec, connection in zip(self._mcp_specs, self._mcp_connections)
+            if tool in {item.name for item in connection.tools}
+        ]
+        if not declaring:
+            known = ", ".join(sorted({item.name for _, item in self.mcp_tools()})) or "нет ни одного"
+            raise MCPError(f"инструмент «{tool}» не объявлен ни одним сервером реестра; известны: {known}")
+        return declaring[0]
+
+    def mcp_lines(self) -> Tuple[str, ...]:
+        """Строки отчёта о подключениях: по серверу — имя, версия, протокол, инструменты, ошибка."""
+        if not self._mcp_connections:
+            return ("Подключения не проверялись: обход реестра не выполнялся.",)
+        lines: List[str] = []
+        for spec, connection in zip(self._mcp_specs, self._mcp_connections):
+            title = spec.name
+            if connection.server_name:
+                title += f" («{connection.server_name}»"
+                title += f" {connection.server_version})" if connection.server_version else ")"
+            lines.append(f"{title} — {spec.transport}: {connection.target}")
+            if not connection.available:
+                lines.append(f"    недоступен: {connection.error}")
+                continue
+            lines.append(f"    протокол: {connection.protocol_version or 'н/д'}; инструментов: {len(connection.tools)}")
+            for tool in connection.tools:
+                parameters = ", ".join(item.render() for item in tool.parameters())
+                lines.append(f"    • {tool.name}: {tool.description}")
+                if parameters:
+                    lines.append(f"        параметры: {parameters}")
+        return tuple(lines)
+
+    def tool_lines(self) -> Tuple[str, ...]:
+        """Перечень инструментов всех серверов — то, что можно вызвать вручную."""
+        tools = self.mcp_tools()
+        if not tools:
+            return ("Инструментов нет: серверы не подключены или ничего не объявляют.",)
+        lines: List[str] = []
+        for server, tool in tools:
+            parameters = ", ".join(item.render() for item in tool.parameters())
+            lines.append(f"{server}.{tool.name}: {tool.description}")
+            if parameters:
+                lines.append(f"    параметры: {parameters}")
+        return tuple(lines)
 
     # --- ветки диалога --------------------------------------------------------------------
 
@@ -322,6 +473,55 @@ class AssistantSession:
             f"запросов — {total.requests}, всего — {total.total_tokens} токенов"
         )
         return tuple(lines)
+
+    def _mcp_command(self, argument: str) -> CommandResult:
+        """`/mcp` — отчёт о подключениях, `/mcp refresh` — обойти реестр заново."""
+        if argument.strip() == "refresh":
+            self.connect_mcp_servers()
+            return CommandResult(
+                command="/mcp",
+                lines=(f"Реестр обойдён заново — {self.mcp_summary()}",) + self.mcp_lines(),
+            )
+        return CommandResult(command="/mcp", lines=self.mcp_lines())
+
+    def _tool_command(self, argument: str) -> CommandResult:
+        """`/tool` — перечень инструментов, `/tool call <имя> ключ=значение …` — ручной вызов.
+
+        Строка разбирается как командная: значение с пробелами берётся в кавычки —
+        `/tool call <инструмент> query="поисковый запрос"`. Имена инструментов ядру неизвестны:
+        они приходят от серверов, поэтому пример здесь обезличен.
+        """
+        tokens = _split_command_line(argument)
+        if not tokens:
+            return CommandResult(command="/tool", lines=self.tool_lines())
+        if tokens[0] != "call":
+            return CommandResult(
+                command="/tool",
+                lines=(
+                    "Форма команды: /tool — перечень, "
+                    "/tool call <инструмент> ключ=значение …",
+                ),
+            )
+        if len(tokens) < 2:
+            return CommandResult(
+                command="/tool", lines=("Укажите инструмент: /tool call <инструмент> …",)
+            )
+        tool = tokens[1]
+        try:
+            arguments = parse_tool_arguments(tokens[2:])
+            result = self.call_mcp_tool(tool, arguments)
+        except MCPError as error:
+            return CommandResult(command="/tool", lines=(f"Инструмент не вызван: {error}",))
+        head = f"🔧 {result.server}.{result.tool}"
+        if result.arguments:
+            rendered = ", ".join(f"{key}={value}" for key, value in result.arguments.items())
+            head += f" ({rendered})"
+        if result.is_error:
+            return CommandResult(
+                command="/tool",
+                lines=(f"{head}: инструмент вернул ошибку", result.text or "(пустой ответ)"),
+            )
+        return CommandResult(command="/tool", lines=(head + ":", result.text or "(пустой ответ)"))
 
     def _domain_command(self, argument: str) -> CommandResult:
         """`/domain` без аргумента — отчёт, `/domain switch <id>` — смена активного домена."""

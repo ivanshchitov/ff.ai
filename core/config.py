@@ -84,6 +84,9 @@ LOCAL_API_URL = os.getenv("FFAI_LOCAL_API_URL", DEFAULT_LOCAL_API_URL)
 DEFAULT_EMBEDDINGS_URL = "http://127.0.0.1:9999/v1/embeddings"
 
 REQUEST_TIMEOUT = int(os.getenv("FFAI_REQUEST_TIMEOUT", "90"))
+# Таймаут подключения к MCP-серверу: поиск по порталу отвечает секундами, но медленный
+# сервер не должен держать интерфейс бесконечно.
+MCP_TIMEOUT = float(os.getenv("FFAI_MCP_TIMEOUT", "60"))
 MAX_RETRIES = 3
 TRANSIENT_STATUSES = (502, 503, 504)
 

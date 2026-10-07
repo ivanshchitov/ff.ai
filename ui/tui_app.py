@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from contextlib import contextmanager
 from typing import List, Optional, Tuple
 
 try:  # pragma: no cover - зависит от сборки Python
@@ -42,6 +43,8 @@ PHASE_LABELS = {
     RequestPhase.REQUEST: "Отправка вопроса...",
     RequestPhase.COMPRESSION: "Суммаризация контекста...",
     RequestPhase.FACTS_UPDATE: "Обновление фактов...",
+    RequestPhase.MCP_CONNECT: "Подключение к MCP-серверам...",
+    RequestPhase.MCP_TOOL: "Вызов инструмента...",
 }
 FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
@@ -93,6 +96,7 @@ class DevAssistantTUI:
 
     def run(self) -> int:
         self._print_welcome()
+        self._print_mcp_summary()
         self._replay_history()
         try:
             while not self.session.exit_requested:
@@ -183,6 +187,26 @@ class DevAssistantTUI:
         body.append(f"\nМодель: {self.session.model}\n")
         body.append("Команды: /commands, /settings, /models, /domain, /context, /exit")
         self.console.print(Panel(body, title="ff.ai", style="cyan"))
+
+    def _print_mcp_summary(self) -> None:
+        """Обход реестра при старте и одна строка сводки: подробности — по команде `/mcp`."""
+        with self._status(PHASE_LABELS[RequestPhase.MCP_CONNECT]) as status:
+
+            def listener(event: object) -> None:
+                if isinstance(event, PhaseChanged):
+                    status.update(PHASE_LABELS.get(event.phase, PHASE_LABELS[RequestPhase.MCP_CONNECT]))
+
+            unsubscribe = self.session.subscribe(listener)
+            try:
+                self.session.connect_mcp_servers()
+            finally:
+                unsubscribe()
+        self.console.print(f"[dim]{escape(self.session.mcp_summary())}[/dim]")
+
+    @contextmanager
+    def _status(self, label: str):
+        with self.console.status(label, spinner="dots") as status:
+            yield status
 
     def _replay_history(self) -> None:
         """Показывает, что контекст восстановлен: число обменов и последний из них."""

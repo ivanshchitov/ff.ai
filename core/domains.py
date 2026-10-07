@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import config
+from .mcp_registry import MCPServerSpec
 
 SCHEMA_VERSION = 1
 _MARKER_TEXT_LIMIT = 200_000
@@ -89,6 +90,10 @@ class Domain:
     markers: Tuple[Marker, ...]
     invariants: Tuple[Invariant, ...]
     path: Path
+    # Серверы, объявленные пакетом: записи реестра MCP, относящиеся к области применимости.
+    servers: Tuple[MCPServerSpec, ...] = ()
+    # Файл белых списков команд и git-подкоманд — данные для собственного сервера репозитория.
+    tools_path: Optional[Path] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -185,6 +190,26 @@ def _load_invariants(path: Path) -> Tuple[Invariant, ...]:
     return tuple(invariants)
 
 
+def _load_servers(path: Path) -> Tuple[MCPServerSpec, ...]:
+    """Необязательный раздел пакета: серверы области применимости.
+
+    Отсутствие файла — это «домен без внешних серверов», а не ошибка: пакет может быть чисто
+    локальным. Сломанный файл, наоборот, обязан остановить загрузку — иначе ассистент молча
+    работал бы без источника знаний, который домен считает обязательным.
+    """
+    if not path.is_file():
+        return ()
+    data = _read_json(path)
+    raw = _require(data, "servers", path, list)
+    servers = []
+    for index, item in enumerate(raw):
+        try:
+            servers.append(MCPServerSpec.from_data(item, source="домен"))
+        except Exception as error:  # MCPSpecError — но ловим и неожиданное: причина нужна пользователю
+            raise DomainSchemaError(f"{path}: сервер #{index + 1} — {error}") from error
+    return tuple(servers)
+
+
 def available_domains(domains_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """Идентификаторы установленных пакетов — по каталогам с `domain.json`."""
     root = Path(domains_dir or config.DOMAINS_DIR)
@@ -223,6 +248,8 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         markers=_load_markers(data, path / "domain.json"),
         invariants=_load_invariants(path / "invariants.json"),
         path=path,
+        servers=_load_servers(path / "servers.json"),
+        tools_path=(path / "tools.json") if (path / "tools.json").is_file() else None,
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

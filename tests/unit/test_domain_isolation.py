@@ -56,3 +56,22 @@ def test_domain_identifier_helper_includes_platform_and_stems():
 @pytest.mark.parametrize("package", PACKAGES)
 def test_packages_exist(package: str):
     assert (config.BASE_DIR / package).is_dir()
+
+
+def test_core_and_ui_do_not_name_tools_of_our_own_server():
+    """Ядро знает команду запуска сервера, но не его инструменты.
+
+    Имена инструментов приходят от сервера при подключении: если бы они были вписаны в ядро или
+    интерфейс, замена сервера перестала бы быть правкой данных. Единственный набор имён, который
+    нам известен заранее, — инструменты собственного сервера репозитория: их и проверяем.
+    """
+    tools = ("repo_tree", "repo_read", "repo_search", "repo_git", "repo_run", "repo_save")
+    for path, text in _sources():
+        for tool in tools:
+            assert tool not in text, f"{path.name}: имя инструмента сервера в ядре или интерфейсе"
+
+
+def test_server_tools_live_in_the_server_package():
+    """Обратная сторона проверки: инструменты объявлены там, где им место."""
+    text = (config.BASE_DIR / "mcp_server" / "repo_server.py").read_text(encoding="utf-8")
+    assert "repo_search" in text and "repo_read" in text

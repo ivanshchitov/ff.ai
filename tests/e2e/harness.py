@@ -80,6 +80,9 @@ class AppSession:
         domain: Optional[str] = None,
         api_url: Optional[str] = None,
         api_key: Optional[str] = "sk-e2e-test",
+        mcp_command: Optional[str] = None,
+        mcp_args: Optional[str] = None,
+        mcp_url: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
         extra_env: Optional[dict] = None,
@@ -149,6 +152,23 @@ class AppSession:
         if api_url is not None:
             env["OPENCODE_API_URL"] = api_url
             env["FFAI_REQUEST_TIMEOUT"] = "1"
+        # Реестр MCP подменяется локальной заглушкой: без этого каждый прогон — тест в том
+        # числе — поднимал бы сервер документации портала и ходил в сеть.
+        if mcp_command == "":
+            # Пустая строка — явная просьба не подменять реестр: так запускается живая проверка
+            # с настоящими серверами (документация портала и собственный сервер репозитория).
+            env.pop("FFAI_MCP_COMMAND", None)
+            env.pop("FFAI_MCP_ARGS", None)
+        elif mcp_url is not None:
+            env["FFAI_MCP_URL"] = mcp_url
+            env.pop("FFAI_MCP_COMMAND", None)
+        else:
+            env["FFAI_MCP_COMMAND"] = mcp_command or sys.executable
+            env["FFAI_MCP_ARGS"] = (
+                mcp_args
+                if mcp_args is not None
+                else str(Path(__file__).resolve().parent.parent / "fake_mcp_server.py")
+            )
         env.update(extra_env or {})
 
         argv = [sys.executable, str(ENTRY_POINT), "--repo", str(self.repo)]
