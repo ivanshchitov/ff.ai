@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from . import config, docs_reranking
+from . import config, reranking
 from .domains import DomainDocs
 from .mcp_registry import MCPServerSpec
 
@@ -264,9 +264,9 @@ class DocsRetriever:
             self._last_rerank_error = _reason(error)
             return candidates, None
         try:
-            parsed = docs_reranking.parse_response(str(ratings or ""), candidates)
-            marked = docs_reranking.mark(candidates, parsed)
-            return marked, docs_reranking.select(marked, parsed, threshold)
+            parsed = reranking.parse_response(str(ratings or ""), candidates)
+            marked = reranking.mark(candidates, parsed)
+            return marked, reranking.select(marked, parsed, threshold)
         except Exception as error:  # noqa: BLE001 - негодный ответ оценщика тоже состояние
             self._last_rerank_error = _reason(error)
             return candidates, None

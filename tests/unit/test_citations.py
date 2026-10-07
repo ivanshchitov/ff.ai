@@ -176,3 +176,61 @@ def test_opt_out_marker_must_be_at_the_beginning():
 def test_retry_prompt_mentions_the_opt_out():
     text = citations.retry_prompt([citations.NO_QUOTE_MARKER])
     assert citations.OPT_OUT_MARKER in text
+
+
+def test_short_fragment_is_confirmed_by_its_whole_text():
+    """Фрагмент короче минимума подтверждается целиком: иначе короткий файл не подтвердить."""
+    from tests.conftest import FakeFragment
+
+    fragment = FakeFragment(
+        identifier="qml/cover/CoverPage.qml:L1-L3",
+        source="qml/cover/CoverPage.qml:L1-L3",
+        text="import QtQuick 2.0\nCoverPage { }",
+    )
+    answer = (
+        "Смотри qml/cover/CoverPage.qml:L1-L3 — файл целиком: "
+        "import QtQuick 2.0 CoverPage { }"
+    )
+    check = citations.check_answer(answer, (fragment,), minimum=40)
+    assert check.confirmed is True
+
+
+def test_short_fragment_quote_still_must_be_verbatim():
+    from tests.conftest import FakeFragment
+
+    fragment = FakeFragment(
+        identifier="qml/cover/CoverPage.qml:L1-L3",
+        source="qml/cover/CoverPage.qml:L1-L3",
+        text="import QtQuick 2.0\nCoverPage { }",
+    )
+    answer = "Смотри qml/cover/CoverPage.qml:L1-L3: import QtQuick 2.0 и что-то ещё"
+    check = citations.check_answer(answer, (fragment,), minimum=40)
+    assert check.confirmed is False
+    assert citations.NO_QUOTE_MARKER in check.violations
+
+
+def test_code_file_path_alone_names_the_source():
+    """Идентификатор кода — путь со строками; один путь тоже называет источник."""
+    from tests.conftest import FakeFragment
+
+    fragment = FakeFragment(
+        identifier="src/models.cpp:L10-L40",
+        source="",
+        text="const QString path = settings_.value(\"models.ini\");",
+    )
+    answer = 'В src/models.cpp: const QString path = settings_.value("models.ini");'
+    check = citations.check_answer(answer, (fragment,), minimum=20)
+    assert check.confirmed is True
+
+
+def test_wrong_file_does_not_name_the_source():
+    from tests.conftest import FakeFragment
+
+    fragment = FakeFragment(
+        identifier="src/models.cpp:L10-L40",
+        source="",
+        text="const QString path = settings_.value(\"models.ini\");",
+    )
+    answer = 'В src/render.cpp: const QString path = settings_.value("models.ini");'
+    check = citations.check_answer(answer, (fragment,), minimum=20)
+    assert citations.NO_SOURCE_MARKER in check.violations

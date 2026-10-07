@@ -58,34 +58,46 @@ class Reranked:
 
 
 @lru_cache(maxsize=None)
-def instruction() -> str:
-    """Инструкция оценщику из ассета: одна на все вопросы, поэтому кэшируется."""
-    path = config.ASSETS_DIR / RERANK_ASSET
+def instruction(asset: str = RERANK_ASSET) -> str:
+    """Инструкция оценщику из ассета корпуса: одна на корпус, поэтому кэшируется по имени файла."""
+    path = config.ASSETS_DIR / asset
     return path.read_text(encoding="utf-8").strip()
 
 
-def candidate_payload(identifier: int, candidate: Any) -> Mapping[str, Any]:
-    """Кандидат в том виде, в каком его видит оценщик: без служебных полей и лишнего текста."""
+def candidate_payload(
+    identifier: int, candidate: Any, snippet_chars: int = None
+) -> Mapping[str, Any]:
+    """Кандидат в том виде, в каком его видит оценщик: без служебных полей и лишнего текста.
+
+    Предел длины сниппета зависит от корпуса: у документации это абзац, у кода — начало блока,
+    и задаёт его вызывающий.
+    """
+    limit = config.DOCS_SNIPPET_CHARS if snippet_chars is None else snippet_chars
     return {
         "id": identifier,
         "path": str(getattr(candidate, "path", "")),
         "title": str(getattr(candidate, "title", "")),
         "section": str(getattr(candidate, "section", "")),
-        "snippet": str(getattr(candidate, "snippet", ""))[: config.DOCS_SNIPPET_CHARS],
+        "snippet": str(getattr(candidate, "snippet", ""))[:limit],
     }
 
 
-def build_messages(question: str, candidates: Sequence[Any]) -> List[dict]:
+def build_messages(
+    question: str,
+    candidates: Sequence[Any],
+    asset: str = RERANK_ASSET,
+    snippet_chars: int = None,
+) -> List[dict]:
     """Сообщения вспомогательного запроса: инструкция в системе, данные — в user-сообщении."""
     payload = {
         "question": question,
         "candidates": [
-            candidate_payload(index, candidate)
+            candidate_payload(index, candidate, snippet_chars)
             for index, candidate in enumerate(candidates, start=1)
         ],
     }
     return [
-        {"role": "system", "content": instruction()},
+        {"role": "system", "content": instruction(asset)},
         {
             "role": "user",
             "content": "Оцени кандидатов и верни только JSON.\n"

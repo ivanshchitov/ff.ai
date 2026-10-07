@@ -769,7 +769,7 @@ def test_versions_property_is_quiet_on_failure(domain, spec):
 
 # --- вторая ступень отбора: оценка кандидатов ----------------------------------------------
 
-from core import docs_reranking  # noqa: E402
+from core import reranking  # noqa: E402
 
 RERANK_TOOLS = {"versions": "tool_versions", "search": "tool_search", "document": "tool_document"}
 

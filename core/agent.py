@@ -17,7 +17,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import citations, config, context_compressor, context_strategies, docs_reranking, prompts
+from . import (
+    citations,
+    code_retrieval,
+    config,
+    context_compressor,
+    context_strategies,
+    prompts,
+    reranking,
+)
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
 from .domains import Domain
@@ -34,6 +42,8 @@ class RequestPhase(Enum):
     MCP_CONNECT = "mcp_connect"
     MCP_TOOL = "mcp_tool"
     DOCS_RERANK = "docs_rerank"
+    CODE_QUERY = "code_query"
+    CODE_RERANK = "code_rerank"
 
 
 @dataclass
@@ -83,6 +93,13 @@ class AgentConfig:
     # Режим отбора кандидатов документации: enhanced оценивает их моделью, baseline — нет.
     docs_retrieval: str = config.DOCS_RETRIEVAL_MODE
     docs_threshold: float = config.DOCS_RELEVANCE_THRESHOLD
+    # Корпус кода: поиск локальный, поэтому выключение убирает доставку фрагментов и сообщений,
+    # а режим с порогом управляют только отбором.
+    code_enabled: bool = True
+    code_retrieval: str = config.CODE_RETRIEVAL_MODE
+    code_threshold: float = config.CODE_RELEVANCE_THRESHOLD
+    code_before: int = config.CODE_CANDIDATES_BEFORE
+    code_after: int = config.CODE_FRAGMENTS_AFTER
 
     @property
     def format(self):
@@ -117,6 +134,7 @@ class RepoAgent:
         model: Optional[str] = None,
         history: Optional[HistoryManager] = None,
         docs_retriever: Optional[object] = None,
+        code_retriever: Optional[object] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -149,6 +167,11 @@ class RepoAgent:
         self.docs_retriever = docs_retriever
         self._last_docs_report: Optional[object] = None
         self._docs_fragments: tuple = ()
+        # Корпус кода: ретривер получает готовый индекс, агент решает, когда искать, и что из
+        # найденного уходит в запрос.
+        self.code_retriever = code_retriever
+        self._last_code_report: Optional[object] = None
+        self._code_fragments: tuple = ()
         self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
@@ -205,6 +228,7 @@ class RepoAgent:
         """
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
         self._retrieve_docs(question, on_phase)
+        self._retrieve_code(question, on_phase)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
@@ -228,7 +252,7 @@ class RepoAgent:
             self._last_docs_report = None
             return
         rate = None
-        if self.config.docs_retrieval == docs_reranking.MODE_ENHANCED:
+        if self.config.docs_retrieval == reranking.MODE_ENHANCED:
             rate = lambda text, candidates: self._rate_candidates(text, candidates, on_phase)
         # Версия документации — свойство ретривера: её задаёт пользователь командой, а в снимок
         # она попадает так, как её выбрал сервер или пользователь.
@@ -245,13 +269,76 @@ class RepoAgent:
         """
         self._signal(on_phase, RequestPhase.DOCS_RERANK)
         meta = self.client.ask_with_usage_messages(
-            docs_reranking.build_messages(question, candidates),
+            reranking.build_messages(question, candidates),
             max_tokens=config.max_tokens_for_words(config.DOCS_RERANK_MAX_WORDS),
             temperature=None,
             model=self.config.model,
         )
         self._ledger.record(meta)
         return meta.content
+
+    def _retrieve_code(self, question: str, on_phase=None) -> None:
+        """Ищет фрагменты исходников перед вопросом; сбой поиска вопрос не отменяет.
+
+        Поиск локальный, поэтому единственное, что мешает ему идти — выключенный корпус или
+        отсутствие индекса: тогда нет ни фрагментов, ни сообщений о поиске.
+        """
+        self._code_fragments = ()
+        if not self.config.code_enabled or self.code_retriever is None:
+            self._last_code_report = None
+            return
+        # Отсутствие индекса — не состояние поиска, а его невозможность: тогда в запрос не уходит
+        # ничего. Нечитаемый (испорченный) индекс — уже состояние, и о нём модель узнаёт.
+        database = getattr(self.code_retriever, "database", None)
+        if database is not None and not Path(database).is_file():
+            self._last_code_report = None
+            return
+        rewrite = None
+        if self.config.code_retrieval == code_retrieval.MODE_ENHANCED:
+            rewrite = lambda text: self._code_query(text, on_phase)
+        rate = None
+        if self.config.code_retrieval == code_retrieval.MODE_ENHANCED:
+            rate = lambda text, candidates: self._code_rerank(text, candidates, on_phase)
+        self._last_code_report = self.code_retriever.search(
+            question,
+            mode=self.config.code_retrieval,
+            rewrite=rewrite,
+            rate=rate,
+            threshold=self.config.code_threshold,
+            before=self.config.code_before,
+            after=self.config.code_after,
+        )
+        self._code_fragments = tuple(
+            getattr(self._last_code_report, "fragments", ()) or ()
+        )
+
+    def _code_query(self, question: str, on_phase=None) -> str:
+        """Переформулировка вопроса в поисковый запрос: вспомогательный запрос сессии."""
+        self._signal(on_phase, RequestPhase.CODE_QUERY)
+        meta = self.client.ask_with_usage_messages(
+            code_retrieval.query_messages(question),
+            max_tokens=config.max_tokens_for_words(config.CODE_QUERY_MAX_WORDS),
+            temperature=None,
+            model=self.config.model,
+        )
+        self._ledger.record(meta)
+        return meta.content
+
+    def _code_rerank(self, question: str, candidates, on_phase=None) -> str:
+        """Оценка кандидатов кода: тот же механизм, что у документации, свой ассет."""
+        self._signal(on_phase, RequestPhase.CODE_RERANK)
+        meta = self.client.ask_with_usage_messages(
+            code_retrieval.rerank_messages(question, candidates),
+            max_tokens=config.max_tokens_for_words(config.CODE_RERANK_MAX_WORDS),
+            temperature=None,
+            model=self.config.model,
+        )
+        self._ledger.record(meta)
+        return meta.content
+
+    def code_report(self) -> Optional[object]:
+        """Снимок последнего поиска по корпусу кода."""
+        return self._last_code_report
 
     def docs_report(self) -> Optional[object]:
         """Снимок последнего поиска: что искали, где, в какой версии, что доставили."""
@@ -267,7 +354,19 @@ class RepoAgent:
         У форматов JSON, компактного и диффа свои контракты: обязательные блоки цитат им бы
         противоречили, поэтому источники им печатает терминальный слой.
         """
-        return bool(self._docs_fragments) and self.config.format is AnswerFormat.FREE
+        return bool(self._docs_fragments or self._code_fragments) and (
+            self.config.format is AnswerFormat.FREE
+        )
+
+    def _citations_check(self, answer: str) -> citations.CitationsCheck:
+        """Проверка ответа против доставленных корпусов: подтверждение любого из них достаточно."""
+        return citations.check_groups(
+            answer,
+            (
+                (self._docs_fragments, config.DOCS_CITATION_MIN_CHARS),
+                (self._code_fragments, config.CODE_CITATION_MIN_CHARS),
+            ),
+        )
 
     def _enforce_citations(
         self,
@@ -282,7 +381,7 @@ class RepoAgent:
         """
         if not self._citations_enabled():
             return meta
-        check = citations.check_answer(meta.content, self._docs_fragments)
+        check = self._citations_check(meta.content)
         if check.confirmed:
             self._last_citations = check
             return meta
@@ -294,7 +393,7 @@ class RepoAgent:
                 {"role": "user", "content": citations.retry_prompt(final)},
             ]
             meta = self._ask_question(retry)
-            repeated = citations.check_answer(meta.content, self._docs_fragments)
+            repeated = self._citations_check(meta.content)
             if repeated.confirmed:
                 self._last_citations = citations.CitationsCheck(
                     violations=check.violations, retried=True
@@ -400,11 +499,11 @@ class RepoAgent:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)}
         ]
-        docs_message = self._docs_message()
-        if docs_message is not None:
-            messages.append(docs_message)
-            if self._citations_enabled():
-                messages.append({"role": "system", "content": citations.citations_message()})
+        for message in (self._docs_message(), self._code_message()):
+            if message is not None:
+                messages.append(message)
+        if self._citations_enabled():
+            messages.append({"role": "system", "content": citations.citations_message()})
         strategy_memory = self._strategy_memory_message()
         if strategy_memory is not None:
             messages.append(strategy_memory)
@@ -427,6 +526,23 @@ class RepoAgent:
             content = citations.context_message(self._docs_fragments, note=note)
             return {"role": "system", "content": content} if content else None
         state_message = prompts.docs_state_message(report)
+        return {"role": "system", "content": state_message} if state_message else None
+
+    def _code_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение о фрагментах исходников или о состоянии их поиска.
+
+        Есть фрагменты — уходит блок с идентификаторами `путь:L10-L40`. Фрагментов нет, но поиск
+        был — уходит инструкция о состоянии: молчание читалось бы как разрешение назвать метод по
+        памяти, а код этого проекта проверяем.
+        """
+        report = self._last_code_report
+        if report is None:
+            return None
+        if self._code_fragments:
+            note = prompts.code_note(report)
+            content = citations.context_message(self._code_fragments, note=note)
+            return {"role": "system", "content": content} if content else None
+        state_message = prompts.code_state_message(report)
         return {"role": "system", "content": state_message} if state_message else None
 
     def _strategy_memory_message(self) -> Optional[Dict[str, str]]:

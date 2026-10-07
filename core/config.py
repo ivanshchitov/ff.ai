@@ -217,6 +217,22 @@ DOCS_RERANK_MAX_WORDS = int(os.getenv("FFAI_DOCS_RERANK_MAX_WORDS", "2000"))
 
 # Проверка ссылок: минимальная длина цитаты и число повторов до замены ответа.
 DOCS_CITATION_MIN_CHARS = int(os.getenv("FFAI_DOCS_CITATION_MIN_CHARS", "20"))
+
+# --- Корпус кода ---
+# Поиск по коду локальный: векторы считаются из текста фрагментов, поэтому режим и порог влияют
+# только на отбор, а не на то, ходит ли приложение в сеть.
+CODE_RETRIEVAL_MODE = os.getenv("FFAI_CODE_RETRIEVAL_MODE", "enhanced")
+CODE_RELEVANCE_THRESHOLD = float(os.getenv("FFAI_CODE_RELEVANCE_THRESHOLD", "0.6"))
+CODE_CANDIDATES_BEFORE = int(os.getenv("FFAI_CODE_CANDIDATES_BEFORE", "20"))
+CODE_FRAGMENTS_AFTER = int(os.getenv("FFAI_CODE_FRAGMENTS_AFTER", "3"))
+# Сколько текста кандидата видит оценщик и сколько доставляется в запрос ответа.
+CODE_SNIPPET_CHARS = int(os.getenv("FFAI_CODE_SNIPPET_CHARS", "1200"))
+CODE_FRAGMENT_MAX_CHARS = int(os.getenv("FFAI_CODE_FRAGMENT_MAX_CHARS", "4000"))
+CODE_RERANK_MAX_WORDS = int(os.getenv("FFAI_CODE_RERANK_MAX_WORDS", "2000"))
+CODE_QUERY_MAX_WORDS = int(os.getenv("FFAI_CODE_QUERY_MAX_WORDS", "200"))
+# Минимум дословной цитаты кода выше, чем у документации: короткая строка кода подтверждает
+# что угодно и ничего не доказывает.
+CODE_CITATION_MIN_CHARS = int(os.getenv("FFAI_CODE_CITATION_MIN_CHARS", "40"))
 DOCS_CITATION_RETRIES = int(os.getenv("FFAI_DOCS_CITATION_RETRIES", "1"))
 
 MAX_INPUT_LENGTH = 2000

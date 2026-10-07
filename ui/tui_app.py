@@ -46,6 +46,8 @@ PHASE_LABELS = {
     RequestPhase.MCP_CONNECT: "Подключение к MCP-серверам...",
     RequestPhase.MCP_TOOL: "Вызов инструмента...",
     RequestPhase.DOCS_RERANK: "Отбор фрагментов документации...",
+    RequestPhase.CODE_QUERY: "Поисковый запрос по исходникам...",
+    RequestPhase.CODE_RERANK: "Отбор фрагментов кода...",
 }
 FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
@@ -155,7 +157,9 @@ class DevAssistantTUI:
         self._print_answer(answer.text)
         self._print_journal()
         self._print_sources()
+        self._print_code_sources()
         self._print_docs_journal()
+        self._print_code_journal()
         self._print_warnings(answer.meta)
         self._print_usage_meta(answer.meta)
 
@@ -262,6 +266,39 @@ class DevAssistantTUI:
         )
         version = escape(str(getattr(report, "version", "") or "н/д"))
         self.console.print(f"[dim]📚 Источники (документация {version}): {rendered}[/dim]")
+
+    def _print_code_sources(self) -> None:
+        """Строка источников по коду: файл и строки каждого доставленного фрагмента."""
+        report = self.session.code_report()
+        fragments = getattr(report, "fragments", ()) or ()
+        if not fragments:
+            return
+        rendered = "; ".join(escape(str(getattr(item, "identifier", ""))) for item in fragments)
+        self.console.print(f"[dim]🧩 Код: {rendered}[/dim]")
+
+    def _print_code_journal(self) -> None:
+        """Строки журнала о поиске по корпусу кода: только отклонения от нормы."""
+        if not self.session.code_enabled:
+            return
+        report = self.session.code_report()
+        status = str(getattr(report, "status", "") or "")
+        if status == "unavailable":
+            reason = escape(str(getattr(report, "error", "") or "причина неизвестна"))
+            self.console.print(
+                f"[bold yellow]🧩 Корпус кода недоступен: {reason} — соберите индекс /code index[/bold yellow]"
+            )
+        elif status == "no_candidates":
+            self.console.print("[dim]🧩 В исходниках по этому вопросу ничего не найдено.[/dim]")
+        elif status == "no_matches":
+            found = len(getattr(report, "candidates", ()) or ())
+            threshold = self.session.code_threshold
+            self.console.print(
+                f"[dim]🧩 Найдено кандидатов: {found}, но ни один не прошёл порог "
+                f"{threshold:.2f} — отвечаю без исходников.[/dim]"
+            )
+        elif status == "rerank_failed":
+            reason = escape(str(getattr(report, "error", "") or "причина неизвестна"))
+            self.console.print(f"[bold yellow]🧩 Отбор фрагментов кода не удался: {reason}[/bold yellow]")
 
     def _print_docs_journal(self) -> None:
         """Строки журнала о поиске и проверке ссылок: только отклонения от нормы."""

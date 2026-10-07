@@ -30,10 +30,12 @@ OPT_OUT_MARKER = "Документация не относится к вопро
 OPT_OUT_WINDOW = 200
 NO_QUOTE_MARKER = "цитаты не подтверждены текстом доставленных фрагментов"
 
+# Текст замены общий для корпусов: он говорит не о платформе и не о коде, а о том, что
+# подтверждения нет. Доменные формулировки живут в пакете домена и в промптах.
 DISCLAIMER_TEXT = (
-    "Не знаю: в доставленных источниках нет фрагмента, который подтверждал бы ответ, "
-    "а отвечать по памяти о платформе я не могу — там всё версионируется. Уточните, пожалуйста, "
-    "вопрос: назовите API, компонент или инструмент, и я поищу в документации снова."
+    "Не знаю: в доставленных источниках нет фрагмента, который подтверждал бы ответ, а отвечать "
+    "по памяти я не могу — без источника ответ нельзя проверить. Уточните, пожалуйста, вопрос: "
+    "назовите точнее место или сущность, и я поищу снова."
 )
 
 
@@ -66,17 +68,20 @@ def _normalize(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def _has_quote(answer: str, fragments: Sequence[Citable]) -> bool:
+def _has_quote(answer: str, fragments: Sequence[Citable], minimum: int = None) -> bool:
     """Есть ли в ответе окно доставленного фрагмента не короче минимума.
 
     Окно двигается от границы слова: так «...cache» в ответе не подтверждается окончанием
     «cache» внутри другого слова фрагмента.
     """
     normalized_answer = _normalize(answer)
-    minimum = config.DOCS_CITATION_MIN_CHARS
+    minimum = config.DOCS_CITATION_MIN_CHARS if minimum is None else minimum
     for fragment in fragments:
         text = _normalize(getattr(fragment, "text", "") or "")
-        if len(text) < minimum:
+        # Фрагмент короче минимума подтверждается цитатой целиком: иначе короткий файл нельзя было
+        # бы подтвердить никогда, и ответ по нему гарантированно заменялся бы текстом «не знаю».
+        minimum = min(minimum, len(text))
+        if minimum == 0:
             continue
         for index in range(len(text) - minimum + 1):
             if index > 0 and text[index - 1] != " ":
@@ -87,13 +92,19 @@ def _has_quote(answer: str, fragments: Sequence[Citable]) -> bool:
 
 
 def _names_source(answer: str, fragments: Sequence[Citable]) -> bool:
-    """Назван ли хотя бы один доставленный источник: путь документа или файл репозитория."""
+    """Назван ли хотя бы один доставленный источник: путь документа или файл репозитория.
+
+    Фрагмент кода опознаётся и по одному пути, без диапазона строк: «src/models.cpp» — это тот же
+    источник, что «src/models.cpp:L10-L40», и требовать префикс `L` значило бы ловить формат записи,
+    а не наличие ссылки. Замена, замена причины — нет: путь сверяется дословно.
+    """
     normalized_answer = _normalize(answer)
     for fragment in fragments:
-        for candidate in (
-            getattr(fragment, "identifier", "") or "",
-            getattr(fragment, "source", "") or "",
-        ):
+        identifier = getattr(fragment, "identifier", "") or ""
+        candidates = [identifier, getattr(fragment, "source", "") or ""]
+        if ":L" in identifier:
+            candidates.append(identifier.split(":L", 1)[0])
+        for candidate in candidates:
             candidate = _normalize(candidate)
             if candidate and candidate in normalized_answer:
                 return True
@@ -105,7 +116,9 @@ def opted_out(answer: str) -> bool:
     return OPT_OUT_MARKER.casefold() in answer[:OPT_OUT_WINDOW].casefold()
 
 
-def check_answer(answer: str, fragments: Sequence[Citable]) -> CitationsCheck:
+def check_answer(
+    answer: str, fragments: Sequence[Citable], minimum: int = None
+) -> CitationsCheck:
     """Проверяет ответ против доставленных фрагментов; пустой список — проверка не выполняется."""
     if not fragments:
         return CitationsCheck(no_context=True)
@@ -114,9 +127,35 @@ def check_answer(answer: str, fragments: Sequence[Citable]) -> CitationsCheck:
     violations: List[str] = []
     if not _names_source(answer, fragments):
         violations.append(NO_SOURCE_MARKER)
-    if not _has_quote(answer, fragments):
+    if not _has_quote(answer, fragments, minimum):
         violations.append(NO_QUOTE_MARKER)
     return CitationsCheck(violations=tuple(violations))
+
+
+def check_groups(
+    answer: str, groups: Sequence[Tuple[Sequence[Citable], int]]
+) -> CitationsCheck:
+    """Проверяет ответ против нескольких корпусов: источник и цитата — из любого из них.
+
+    Корпуса различаются минимумом длины цитаты (документация — абзац, код — несколько строк),
+    поэтому проверка идёт по каждому отдельно, а подтверждение любого из них достаточно:
+    смешанный вопрос отвечается и по коду, и по документации, и требовать оба сразу значило бы
+    запретить честный ответ по одному источнику.
+    """
+    delivered = tuple(
+        (fragments, minimum) for fragments, minimum in groups if fragments
+    )
+    if not delivered:
+        return CitationsCheck(no_context=True)
+    if opted_out(answer):
+        return CitationsCheck(opted_out=True)
+    violations: List[str] = []
+    for fragments, minimum in delivered:
+        check = check_answer(answer, fragments, minimum)
+        if check.confirmed:
+            return CitationsCheck()
+        violations.extend(check.violations)
+    return CitationsCheck(violations=tuple(dict.fromkeys(violations)))
 
 
 @lru_cache(maxsize=None)

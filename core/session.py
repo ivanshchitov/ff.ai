@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import code_index, config, docs_reranking, domains, mcp_registry
+from . import code_index, code_retrieval, config, domains, mcp_registry, reranking
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
@@ -124,6 +124,7 @@ class AssistantSession:
         settings: Optional[AnswerSettings] = None,
         mcp_client_factory: Optional[Callable[[MCPServerSpec], MCPClient]] = None,
         docs_retriever: object = RETRIEVER_UNSET,
+        code_retriever: object = RETRIEVER_UNSET,
     ) -> None:
         self.root = Path(root)
         self._lock = threading.RLock()
@@ -144,6 +145,13 @@ class AssistantSession:
             if docs_retriever is RETRIEVER_UNSET
             else docs_retriever
         )
+        # Корпус кода: индекс читается по пути кэша, поиск локальный. Явный `None` означает
+        # «поиска по коду в этой сессии не будет» — так тесты отключают корпус целиком.
+        self._code_retriever = (
+            self._build_code_retriever()
+            if code_retriever is RETRIEVER_UNSET
+            else code_retriever
+        )
         self._mcp_specs: Tuple[MCPServerSpec, ...] = ()
         self._mcp_connections: Tuple[MCPConnection, ...] = ()
         # Снимок последней сборки корпуса кода: нужен, чтобы отчёт печатался без повторного чтения.
@@ -155,6 +163,7 @@ class AssistantSession:
             settings=settings if settings is not None else AnswerSettings(),
             history=self._history,
             docs_retriever=self._docs_retriever,
+            code_retriever=self._code_retriever,
         )
 
     # --- доступ к состоянию ---------------------------------------------------------------
@@ -315,6 +324,17 @@ class AssistantSession:
         with self._lock:
             return self._agent.context_report()
 
+    def _build_code_retriever(self) -> Optional[object]:
+        """Собирает поиск по корпусу кода: индекс берётся из кэша состояния.
+
+        Индекса может не быть — это законный случай: поиск тогда не выполняется, и агент не
+        добавляет ни фрагментов, ни сообщений о состоянии.
+        """
+        corpus = getattr(self.domain, "corpus", None)
+        if corpus is None:
+            return None
+        return code_retrieval.CodeRetriever(config.repo_index_file(self.root), corpus)
+
     def _build_docs_retriever(self) -> Optional[object]:
         """Собирает ретривер документации по данным домена; нет корпуса — нет ретривера.
 
@@ -352,6 +372,23 @@ class AssistantSession:
     def last_citations(self):
         with self._lock:
             return self._agent.last_citations
+
+    def code_report(self) -> Optional[object]:
+        """Снимок последнего поиска по корпусу кода (или None, если поиска не было)."""
+        with self._lock:
+            return self._agent.code_report()
+
+    @property
+    def code_enabled(self) -> bool:
+        return self._agent.config.code_enabled
+
+    @property
+    def code_retrieval(self) -> str:
+        return self._agent.config.code_retrieval
+
+    @property
+    def code_threshold(self) -> float:
+        return self._agent.config.code_threshold
 
     @property
     def docs_enabled(self) -> bool:
@@ -423,15 +460,15 @@ class AssistantSession:
         argument = argument.strip()
         if argument.startswith("retrieval"):
             value = argument[len("retrieval") :].strip().lower()
-            if value not in docs_reranking.MODES:
+            if value not in reranking.MODES:
                 return CommandResult(
                     command="/docs",
-                    lines=(f"Форма: /docs retrieval {'|'.join(docs_reranking.MODES)}",),
+                    lines=(f"Форма: /docs retrieval {'|'.join(reranking.MODES)}",),
                 )
             self._agent.config.docs_retrieval = value
             note = (
                 "кандидаты оцениваются моделью"
-                if value == docs_reranking.MODE_ENHANCED
+                if value == reranking.MODE_ENHANCED
                 else "кандидаты доставляются без оценки"
             )
             return CommandResult(
@@ -671,6 +708,16 @@ class AssistantSession:
             return CommandResult(
                 command="/code", lines=("Домен не объявляет корпус кода.",)
             )
+        if action == "retrieval":
+            return self._code_retrieval_command(tokens[1:])
+        if action == "threshold":
+            return self._code_threshold_command(tokens[1:])
+        if action == "tune":
+            return self._code_tune_command(tokens[1:])
+        if action == "mode":
+            return self._code_mode_command(tokens[1:])
+        if action == "trace":
+            return CommandResult(command="/code", lines=self.code_trace_lines())
         if action == "index":
             strategy = tokens[1] if len(tokens) > 1 else corpus.strategy
             try:
@@ -693,10 +740,123 @@ class AssistantSession:
             return CommandResult(
                 command="/code",
                 lines=(
-                    "Форма команды: /code index [fixed|structural], /code status, /code compare",
+                    "Форма команды: /code index [fixed|structural], /code status, /code compare, "
+                    "/code retrieval baseline|enhanced, /code threshold <0..1>, "
+                    "/code tune before=<n> after=<n>, /code mode on|off, /code trace",
                 ),
             )
         return CommandResult(command="/code", lines=self.code_lines())
+
+    def _code_retrieval_command(self, tokens: List[str]) -> CommandResult:
+        """`/code retrieval baseline|enhanced` — режим отбора кандидатов корпуса кода."""
+        value = tokens[0].lower() if tokens else ""
+        if value not in reranking.MODES:
+            return CommandResult(
+                command="/code", lines=(f"Форма: /code retrieval {'|'.join(reranking.MODES)}",)
+            )
+        self._agent.config.code_retrieval = value
+        note = (
+            "вопрос переформулируется, кандидаты оцениваются моделью"
+            if value == reranking.MODE_ENHANCED
+            else "поиск по исходному вопросу, первые результаты без оценки"
+        )
+        return CommandResult(
+            command="/code", lines=(f"Режим отбора: {value} — {note}.",) + self.code_trace_lines()
+        )
+
+    def _code_threshold_command(self, tokens: List[str]) -> CommandResult:
+        """`/code threshold <число от 0 до 1>` — порог отбора кандидатов."""
+        raw = (tokens[0].replace(",", ".") if tokens else "")
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return CommandResult(
+                command="/code", lines=("Форма: /code threshold <число от 0 до 1>",)
+            )
+        if not 0.0 <= parsed <= 1.0:
+            return CommandResult(
+                command="/code", lines=(f"Порог должен быть от 0 до 1, а не {parsed}.",)
+            )
+        self._agent.config.code_threshold = parsed
+        return CommandResult(command="/code", lines=(f"Порог отбора: {parsed:.2f}.",))
+
+    def _code_tune_command(self, tokens: List[str]) -> CommandResult:
+        """`/code tune before=<n> after=<n>` — пулы кандидатов и фрагментов, целиком атомарно.
+
+        Негодная пара не меняет ни одно поле: половинчатые настройки опаснее отказа, потому что
+        выглядят применёнными.
+        """
+        form = "Форма: /code tune before=<кандидатов> after=<фрагментов>"
+        values = {}
+        for token in tokens:
+            key, separator, value = token.partition("=")
+            if not separator or key not in ("before", "after"):
+                return CommandResult(command="/code", lines=(form,))
+            try:
+                values[key] = int(value)
+            except ValueError:
+                return CommandResult(command="/code", lines=(form,))
+        if set(values) != {"before", "after"}:
+            return CommandResult(command="/code", lines=(form,))
+        before, after = values["before"], values["after"]
+        if before < 1 or after < 1 or after > before:
+            return CommandResult(
+                command="/code",
+                lines=(
+                    f"Пул кандидатов {before}, фрагментов {after}: нужно before ≥ 1, "
+                    "1 ≤ after ≤ before. Настройки не изменены.",
+                ),
+            )
+        self._agent.config.code_before = before
+        self._agent.config.code_after = after
+        return CommandResult(
+            command="/code",
+            lines=(f"Пулы: до {before} кандидатов, до {after} фрагментов.",) + self.code_trace_lines(),
+        )
+
+    def _code_mode_command(self, tokens: List[str]) -> CommandResult:
+        """`/code mode on|off` — поиск по корпусу кода целиком."""
+        value = tokens[0].lower() if tokens else ""
+        if value not in ("on", "off"):
+            return CommandResult(command="/code", lines=("Форма: /code mode on|off",))
+        self._agent.config.code_enabled = value == "on"
+        state = "включён" if self._agent.config.code_enabled else "выключен"
+        return CommandResult(
+            command="/code",
+            lines=(f"Поиск по корпусу кода {state}.",)
+            + (self.code_trace_lines() if self._agent.config.code_enabled else ()),
+        )
+
+    def code_trace_lines(self) -> Tuple[str, ...]:
+        """Отчёт о последнем поиске по корпусу кода: запрос, режим, оценки, доставленное."""
+        config_ = self._agent.config
+        if not config_.code_enabled:
+            return ("Поиск по корпусу кода выключен (/code mode on — включить).",)
+        settings = (
+            f"Режим отбора: {config_.code_retrieval}; порог: {config_.code_threshold:.2f}; "
+            f"пулы: до {config_.code_before} кандидатов, до {config_.code_after} фрагментов"
+        )
+        report = self._agent.code_report()
+        if report is None:
+            return (settings, "Поиска ещё не было: он выполняется перед каждым вопросом.")
+        lines = [
+            f"Вопрос: {report.question}",
+            f"Поисковый запрос: {report.query}",
+            settings,
+            f"Индекс: {report.database}; фрагментов в индексе: {report.chunks}",
+            f"Состояние: {report.status}"
+            + (f" ({report.error})" if report.error else ""),
+            f"Кандидатов: {len(report.candidates)}"
+            + (" (оценены)" if report.rated else " (оценка не выполнялась)"),
+        ]
+        lines.extend(code_retrieval.rate_lines(report.candidates[:5]))
+        lines.append(f"Доставлено фрагментов: {len(report.fragments)}")
+        for fragment in report.fragments:
+            lines.append(
+                f"    {fragment.identifier} — {len(fragment.text)} симв."
+                + (" (обрезан)" if fragment.truncated else "")
+            )
+        return tuple(lines)
 
     def code_lines(self) -> Tuple[str, ...]:
         """Отчёт о корпусе кода: путь индекса, стратегия, время сборки, файлы, фрагменты, пропуски."""

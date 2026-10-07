@@ -507,6 +507,42 @@ def read_index(database: Path) -> Optional[IndexReport]:
     )
 
 
+def read_chunks(database: Path) -> Tuple[CodeChunk, ...]:
+    """Фрагменты из индекса — в порядке путей и строк: так поиск получает стабильный вход.
+
+    Чтение только на чтение и без обращения к репозиторию: индекс самодостаточен, а тексты в нём
+    уже дословные. Битый или чужой файл — пустой результат, а не исключение: вызывающий решает,
+    что показать пользователю.
+    """
+    database = Path(database)
+    if not index_exists(database):
+        return ()
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return ()
+    try:
+        rows = connection.execute(
+            "SELECT strategy, chunk_id, path, start_line, end_line, content FROM chunks "
+            "ORDER BY path, start_line"
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    finally:
+        connection.close()
+    return tuple(
+        CodeChunk(
+            strategy=strategy,
+            chunk_id=chunk_id,
+            path=path,
+            start_line=int(start_line),
+            end_line=int(end_line),
+            text=content,
+        )
+        for strategy, chunk_id, path, start_line, end_line, content in rows
+    )
+
+
 def sample_labels(chunks: Sequence[CodeChunk], limit: int = 3) -> Tuple[str, ...]:
     """Примеры границ фрагментов — по одному на файл, чтобы пример не повторял один и тот же файл."""
     labels: List[str] = []
