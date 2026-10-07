@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import code_index, code_retrieval, config, domains, mcp_registry, reranking
+from . import code_index, code_retrieval, config, domains, mcp_registry, mcp_tools, reranking
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
@@ -164,6 +164,7 @@ class AssistantSession:
             history=self._history,
             docs_retriever=self._docs_retriever,
             code_retriever=self._code_retriever,
+            tool_hub=self._tool_hub(),
         )
 
     # --- доступ к состоянию ---------------------------------------------------------------
@@ -324,6 +325,17 @@ class AssistantSession:
         with self._lock:
             return self._agent.context_report()
 
+    def _tool_hub(self) -> Optional[object]:
+        """Доступ к инструментам по текущим снимкам подключений.
+
+        Пока обход реестра не выполнялся, снимков нет — и автовызов не может предложить модели ни
+        одного инструмента. После `/mcp refresh` хаб собирается заново: каталог обязан отражать
+        то, что серверы ответили сейчас.
+        """
+        if not self._mcp_specs:
+            return None
+        return mcp_tools.ToolHub(self._mcp_specs, self._mcp_connections, self._mcp_client_factory)
+
     def _build_code_retriever(self) -> Optional[object]:
         """Собирает поиск по корпусу кода: индекс берётся из кэша состояния.
 
@@ -372,6 +384,11 @@ class AssistantSession:
     def last_citations(self):
         with self._lock:
             return self._agent.last_citations
+
+    def tool_flow_report(self):
+        """Снимок последнего флоу автовызова (или None, если флоу не выполнялся)."""
+        with self._lock:
+            return self._agent.tool_flow_report()
 
     def code_report(self) -> Optional[object]:
         """Снимок последнего поиска по корпусу кода (или None, если поиска не было)."""
@@ -529,6 +546,7 @@ class AssistantSession:
                 self._emit(PhaseChanged(RequestPhase.MCP_CONNECT))
                 connections.append(self._mcp_client_factory(spec).connect())
             self._mcp_connections = tuple(connections)
+            self._agent.tool_hub = self._tool_hub()
             return self._mcp_connections
 
     def mcp_report(self) -> Tuple[MCPConnection, ...]:
@@ -906,8 +924,33 @@ class AssistantSession:
             )
         return CommandResult(command="/mcp", lines=self.mcp_lines())
 
+    def tool_flow_lines(self) -> Tuple[str, ...]:
+        """Отчёт о последнем флоу автовызова: раунды, шаги с объёмами передачи, причина остановки.
+
+        Строится из снимка: ни модели, ни серверных процессов. Журнальные строки шагов здесь те же,
+        что печатает интерфейс, — формат у них один.
+        """
+        state = "включён" if self._agent.config.auto_tools else "выключен"
+        lines: List[str] = [f"Автовызов инструментов: {state}"]
+        report = self._agent.tool_flow_report()
+        if report is None:
+            lines.append(
+                "Флоу не выполнялся: он идёт перед каждым вопросом, когда есть что выбирать."
+            )
+            return tuple(lines)
+        lines.append(f"Вопрос: {report.question}")
+        lines.append(
+            f"Раундов: {report.rounds}; запросов выбора: {report.choice_requests}; "
+            f"шагов: {report.executed}"
+        )
+        if report.dropped:
+            lines.append(f"Отброшено шагов сверх предела: {report.dropped}")
+        lines.append(f"Остановка: {report.stop_reason}")
+        lines.extend(f"    {step.journal_line()}" for step in report.steps)
+        return tuple(lines)
+
     def _tool_command(self, argument: str) -> CommandResult:
-        """`/tool` — перечень инструментов, `/tool call <имя> ключ=значение …` — ручной вызов.
+        """`/tool` — перечень, `/tool call` — ручной вызов, `/tool auto` и `/tool flow` — автовызов.
 
         Строка разбирается как командная: значение с пробелами берётся в кавычки —
         `/tool call <инструмент> query="поисковый запрос"`. Имена инструментов ядру неизвестны:
@@ -916,12 +959,27 @@ class AssistantSession:
         tokens = _split_command_line(argument)
         if not tokens:
             return CommandResult(command="/tool", lines=self.tool_lines())
+        if tokens[0] == "auto":
+            value = tokens[1].lower() if len(tokens) > 1 else ""
+            if value not in ("on", "off"):
+                return CommandResult(command="/tool", lines=("Форма: /tool auto on|off",))
+            self._agent.config.auto_tools = value == "on"
+            state = "включён" if self._agent.config.auto_tools else "выключен"
+            return CommandResult(
+                command="/tool",
+                lines=(
+                    f"Автовызов инструментов {state}.",
+                    "Выключенный автовызов не делает ни запроса выбора, ни вызовов инструментов.",
+                ),
+            )
+        if tokens[0] == "flow":
+            return CommandResult(command="/tool", lines=self.tool_flow_lines())
         if tokens[0] != "call":
             return CommandResult(
                 command="/tool",
                 lines=(
-                    "Форма команды: /tool — перечень, "
-                    "/tool call <инструмент> ключ=значение …",
+                    "Форма команды: /tool — перечень, /tool call <инструмент> ключ=значение …, "
+                    "/tool auto on|off, /tool flow",
                 ),
             )
         if len(tokens) < 2:

@@ -73,7 +73,7 @@ def reexec_in_venv(script: Path) -> None:
     )
 
 
-def build_server(log_level: str = "INFO", empty: bool = False) -> "MCPServer":
+def build_server(log_level: str = "INFO", empty: bool = False, second: bool = False) -> "MCPServer":
     """Сервер с инструментами заглушки; `empty=True` — совсем без инструментов."""
     # Импорт внутри функции, а не сверху модуля: перезапуск в `.venv` должен случиться раньше,
     # иначе системный `python3` (3.9, без `mcp`) падает на импорте до всякой логики.
@@ -87,6 +87,21 @@ def build_server(log_level: str = "INFO", empty: bool = False) -> "MCPServer":
         log_level=log_level,
     )
     if empty:
+        return server
+
+    if second:
+        # Второй сервер заглушки: другой набор имён, чтобы сквозной тест автовызова мог проверить
+        # маршрутизацию шага между серверами и перенаправление неверно названного сервера.
+        @server.tool()
+        def fake_facts(topic: str) -> str:
+            """Возвращает факт по теме: инструмент второго сервера для раундов флоу."""
+            return f"тема: {topic}; факт: проверено заглушкой"
+
+        @server.tool()
+        def fake_report(text: str) -> str:
+            """Принимает текст и подтверждает приём: результат-подтверждение, а не данные."""
+            return f"принято: {len(text)} символов"
+
         return server
 
     @server.tool()
@@ -125,6 +140,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--empty", action="store_true", help="не объявлять ни одного инструмента")
     parser.add_argument(
+        "--second",
+        action="store_true",
+        help="второй набор инструментов: другой сервер заглушки для маршрутизации",
+    )
+    parser.add_argument(
         "--garbage",
         action="store_true",
         help="напечатать мусор вместо протокола и выйти с кодом 0",
@@ -140,7 +160,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print_garbage()
         return 0
 
-    server = build_server(empty=args.empty)
+    server = build_server(empty=args.empty, second=args.second)
     server.run(transport="stdio")
     return 0
 

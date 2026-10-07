@@ -630,3 +630,35 @@ def test_code_commands_make_no_model_requests(repo: Path):
     ):
         session.run_command(command)
     assert client.calls == []
+
+
+# --- автовызов инструментов -----------------------------------------------------------------
+
+
+def test_tool_auto_command(repo: Path):
+    session = _session(repo)
+    assert session._agent.config.auto_tools is True
+    session.run_command("/tool auto off")
+    assert session._agent.config.auto_tools is False
+    session.run_command("/tool auto on")
+    assert session._agent.config.auto_tools is True
+
+
+def test_tool_auto_command_form(repo: Path):
+    session = _session(repo)
+    result = session.run_command("/tool auto какой-то")
+    assert "Форма: /tool auto on|off" in result.lines[0]
+
+
+def test_tool_flow_report_without_flow(repo: Path):
+    session = _session(repo)
+    lines = session.run_command("/tool flow").lines
+    assert "Автовызов инструментов: включён" in lines[0]
+    assert any("Флоу не выполнялся" in line for line in lines)
+
+
+def test_tool_command_help_lists_auto_and_flow(repo: Path):
+    session = _session(repo)
+    lines = session.run_command("/tool нет-такой-подкоманды").lines
+    assert any("/tool auto on|off" in line for line in lines)
+    assert any("/tool flow" in line for line in lines)

@@ -124,6 +124,10 @@ def repo_server_spec(root: Path, tools_path: Optional[Path] = None) -> MCPServer
         description=REPO_SERVER_DESCRIPTION,
         command=sys.executable,
         args=tuple(args),
+        # Каталог выгрузок читает серверный процесс, а не приложение: без этой переменной в
+        # окружении сервера выгрузка уходила бы в каталог состояния по умолчанию, а не туда,
+        # куда просит запуск (ловилось живым прогоном: отчёт оказался в домашнем каталоге).
+        env_keys=("FFAI_EXPORTS_DIR",),
         source="инструмент",
     )
     spec.validate()
@@ -149,17 +153,27 @@ def _override_from_environment() -> Optional[Tuple[MCPServerSpec, ...]]:
         spec.validate()
         return (spec,)
     if command:
-        args = tuple(part for part in os.getenv("FFAI_MCP_ARGS", "").split(" ") if part)
-        spec = MCPServerSpec(
-            name=config.MCP_OVERRIDE_NAME,
-            transport=TRANSPORT_STDIO,
-            command=command,
-            args=args,
-            description="сервер, заданный переменными FFAI_MCP_COMMAND и FFAI_MCP_ARGS",
-            source="окружение",
-        )
-        spec.validate()
-        return (spec,)
+        # Несколько наборов аргументов, разделённых « | », дают несколько серверов: сквозные тесты
+        # автовызова проверяют маршрутизацию шага между серверами, а переопределение окружением
+        # заменяет реестр целиком — значит, серверов должно быть столько, сколько нужно тесту.
+        sets = [
+            tuple(part for part in chunk.split(" ") if part)
+            for chunk in os.getenv("FFAI_MCP_ARGS", "").split(" | ")
+        ]
+        specs = []
+        for index, args in enumerate(sets, start=1):
+            name = config.MCP_OVERRIDE_NAME if len(sets) == 1 else f"{config.MCP_OVERRIDE_NAME} {index}"
+            spec = MCPServerSpec(
+                name=name,
+                transport=TRANSPORT_STDIO,
+                command=command,
+                args=args,
+                description="сервер, заданный переменными FFAI_MCP_COMMAND и FFAI_MCP_ARGS",
+                source="окружение",
+            )
+            spec.validate()
+            specs.append(spec)
+        return tuple(specs)
     return None
 
 

@@ -249,3 +249,40 @@ def test_journal_reports_low_relevance_and_failed_rating(tui, recording_console,
     )
     tui._ask("вопрос")
     assert recording_console.contains("Оценка фрагментов не удалась: ответ оценщика не разобран")
+
+
+def test_tool_flow_journal_lines(tui, recording_console):
+    """Журнал печатает строку на шаг и причину остановки, когда флоу оборвался."""
+    from core import mcp_tools
+
+    step = mcp_tools.ToolStep(
+        step=1,
+        round=1,
+        server="repo",
+        tool="repo_search",
+        arguments={"query": "модель"},
+        sources={},
+        text="найдено",
+    )
+    tui.session._agent._last_tool_flow = mcp_tools.ToolFlowReport(
+        question="где модель?",
+        rounds=1,
+        choice_requests=1,
+        steps=(step,),
+        stop_reason=mcp_tools.FLOW_STEP_FAILED.format(number=2),
+    )
+    tui._print_tool_journal()
+    assert recording_console.contains("1 шаг · repo.repo_search")
+    assert recording_console.contains("Флоу остановлен: сбой шага 2")
+
+
+def test_tool_flow_journal_silent_without_steps(tui, recording_console):
+    """Когда модель решила, что инструменты не нужны, журнал молчит: это обычный исход."""
+    from core import mcp_tools
+
+    tui.session._agent._last_tool_flow = mcp_tools.ToolFlowReport(
+        question="вопрос", rounds=1, choice_requests=1, steps=(), stop_reason=mcp_tools.FLOW_NO_TOOL
+    )
+    before = recording_console.text
+    tui._print_tool_journal()
+    assert recording_console.text == before

@@ -233,6 +233,22 @@ CODE_QUERY_MAX_WORDS = int(os.getenv("FFAI_CODE_QUERY_MAX_WORDS", "200"))
 # Минимум дословной цитаты кода выше, чем у документации: короткая строка кода подтверждает
 # что угодно и ничего не доказывает.
 CODE_CITATION_MIN_CHARS = int(os.getenv("FFAI_CODE_CITATION_MIN_CHARS", "40"))
+
+# --- Автовызов инструментов ---
+# Автовызов стоит одного вспомогательного запроса на вопрос; выключение (для тестов, считающих
+# запросы, и для работы без инструментов) не делает ни одного запроса выбора.
+AUTO_TOOLS = os.getenv("FFAI_AUTO_TOOLS", "1").strip().lower() not in ("0", "false", "нет")
+# Потолок ответа выбора: рассуждающие модели тратят сотни токенов до первого символа JSON.
+TOOL_CHOICE_MAX_WORDS = int(os.getenv("FFAI_TOOL_CHOICE_MAX_WORDS", "2000"))
+# Шагов в одной цепочке и раундов всего: пределы — данные, а не константы в коде флоу.
+TOOL_CHAIN_MAX_STEPS = int(os.getenv("FFAI_TOOL_CHAIN_MAX_STEPS", "4"))
+TOOL_FLOW_MAX_ROUNDS = int(os.getenv("FFAI_TOOL_FLOW_MAX_ROUNDS", "6"))
+TOOL_FLOW_MAX_STEPS = int(os.getenv("FFAI_TOOL_FLOW_MAX_STEPS", "10"))
+# Бюджеты контекста: результаты последнего раунда целиком, ранние — коротко, каждый шаг в запросе
+# ответа — с ограничением.
+TOOL_FLOW_CONTEXT_CHARS = int(os.getenv("FFAI_TOOL_FLOW_CONTEXT_CHARS", "24000"))
+TOOL_FLOW_OLD_RESULT_CHARS = int(os.getenv("FFAI_TOOL_FLOW_OLD_RESULT_CHARS", "1500"))
+TOOL_ANSWER_RESULT_CHARS = int(os.getenv("FFAI_TOOL_ANSWER_RESULT_CHARS", "6000"))
 DOCS_CITATION_RETRIES = int(os.getenv("FFAI_DOCS_CITATION_RETRIES", "1"))
 
 MAX_INPUT_LENGTH = 2000

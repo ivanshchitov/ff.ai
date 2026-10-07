@@ -133,3 +133,28 @@ def test_identifiers_of_domain_do_not_include_server_names():
     identifiers = domains.identifiers_of(domain)
     for spec in domain.servers:
         assert spec.name.lower() not in identifiers
+
+
+def test_override_environment_can_hold_several_servers(monkeypatch: pytest.MonkeyPatch):
+    """Разделитель « | » даёт несколько серверов: нужно сквозной проверке маршрутизации шага."""
+    monkeypatch.setenv("FFAI_MCP_COMMAND", "python3")
+    monkeypatch.setenv("FFAI_MCP_ARGS", "-m fake | -m fake --second")
+    specs = mcp_registry.registry()
+    assert len(specs) == 2
+    assert specs[0].args == ("-m", "fake")
+    assert specs[1].args == ("-m", "fake", "--second")
+    assert specs[0].name != specs[1].name
+
+
+def test_override_environment_single_server_keeps_its_name(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FFAI_MCP_COMMAND", "python3")
+    monkeypatch.setenv("FFAI_MCP_ARGS", "-m fake")
+    specs = mcp_registry.registry()
+    assert len(specs) == 1
+    assert specs[0].name == mcp_registry.config.MCP_OVERRIDE_NAME
+
+
+def test_repo_server_spec_forwards_the_exports_directory(tmp_path: Path):
+    """Каталог выгрузок читает серверный процесс: без переменной он пишет не туда, куда просят."""
+    spec = mcp_registry.repo_server_spec(tmp_path)
+    assert "FFAI_EXPORTS_DIR" in spec.env_keys

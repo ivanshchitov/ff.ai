@@ -48,6 +48,7 @@ PHASE_LABELS = {
     RequestPhase.DOCS_RERANK: "Отбор фрагментов документации...",
     RequestPhase.CODE_QUERY: "Поисковый запрос по исходникам...",
     RequestPhase.CODE_RERANK: "Отбор фрагментов кода...",
+    RequestPhase.TOOL_CHOICE: "Выбор инструментов...",
 }
 FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
@@ -160,6 +161,7 @@ class DevAssistantTUI:
         self._print_code_sources()
         self._print_docs_journal()
         self._print_code_journal()
+        self._print_tool_journal()
         self._print_warnings(answer.meta)
         self._print_usage_meta(answer.meta)
 
@@ -266,6 +268,24 @@ class DevAssistantTUI:
         )
         version = escape(str(getattr(report, "version", "") or "н/д"))
         self.console.print(f"[dim]📚 Источники (документация {version}): {rendered}[/dim]")
+
+    def _print_tool_journal(self) -> None:
+        """Строки журнала о флоу инструментов: по строке на шаг, плюс причина остановки.
+
+        Ничего не печатается, если модель решила, что инструменты не нужны: это обычный исход, а не
+        событие. Объёмы переданного текста в строке шага — чтобы передачу данных можно было
+        проверить глазами.
+        """
+        report = self.session.tool_flow_report()
+        if report is None or not report.steps:
+            return
+        for step in report.steps:
+            self.console.print(f"[dim]{escape(step.journal_line())}[/dim]")
+        failure_markers = ("сбой", "исчерпан")
+        if any(marker in report.stop_reason for marker in failure_markers):
+            self.console.print(
+                f"[bold yellow]🔧 Флоу остановлен: {escape(report.stop_reason)}[/bold yellow]"
+            )
 
     def _print_code_sources(self) -> None:
         """Строка источников по коду: файл и строки каждого доставленного фрагмента."""

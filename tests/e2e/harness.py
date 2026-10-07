@@ -84,6 +84,7 @@ class AppSession:
         mcp_args: Optional[str] = None,
         mcp_url: Optional[str] = None,
         mcp_name: Optional[str] = None,
+        auto_tools: bool = False,
         cols: int = 100,
         rows: int = 40,
         extra_env: Optional[dict] = None,
@@ -132,6 +133,9 @@ class AppSession:
             # прогон. Таймаут сжимается только для stub-сервера — живой модели нужны десятки
             # секунд, поэтому там остаётся значение приложения по умолчанию.
             "FFAI_TYPING_DELAY": "0",
+            # Автовызов инструментов выключен по умолчанию: иначе каждый тест, считающий запросы
+            # или читающий первый запрос, мерил бы запрос выбора вместо ответа.
+            "FFAI_AUTO_TOOLS": "1" if auto_tools else "0",
             # Пути состояния: без явного переопределения прогон читал бы и писал реальные
             # файлы пользователя и видел бы записи прошлых сессий.
             "FFAI_STATE_DIR": str(state),

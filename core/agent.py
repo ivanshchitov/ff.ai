@@ -21,6 +21,7 @@ from . import (
     citations,
     code_retrieval,
     config,
+    mcp_tools,
     context_compressor,
     context_strategies,
     prompts,
@@ -30,6 +31,7 @@ from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
 from .domains import Domain
 from .history_manager import HistoryManager
+from .mcp_client import MCPError
 from .usage import SessionLedger, SessionUsage, estimate_tokens
 
 
@@ -44,6 +46,7 @@ class RequestPhase(Enum):
     DOCS_RERANK = "docs_rerank"
     CODE_QUERY = "code_query"
     CODE_RERANK = "code_rerank"
+    TOOL_CHOICE = "tool_choice"
 
 
 @dataclass
@@ -100,6 +103,8 @@ class AgentConfig:
     code_threshold: float = config.CODE_RELEVANCE_THRESHOLD
     code_before: int = config.CODE_CANDIDATES_BEFORE
     code_after: int = config.CODE_FRAGMENTS_AFTER
+    # Автовызов инструментов: одно вспомогательное обращение на вопрос, когда есть что выбирать.
+    auto_tools: bool = config.AUTO_TOOLS
 
     @property
     def format(self):
@@ -135,6 +140,7 @@ class RepoAgent:
         history: Optional[HistoryManager] = None,
         docs_retriever: Optional[object] = None,
         code_retriever: Optional[object] = None,
+        tool_hub: Optional[object] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -172,6 +178,10 @@ class RepoAgent:
         self.code_retriever = code_retriever
         self._last_code_report: Optional[object] = None
         self._code_fragments: tuple = ()
+        # Автовызов инструментов: каталог приходит из снимков подключений, флоу исполняет агент.
+        self.tool_hub = tool_hub
+        self._last_tool_flow: Optional[mcp_tools.ToolFlowReport] = None
+        self._tool_steps: tuple = ()
         self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
@@ -229,6 +239,7 @@ class RepoAgent:
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
         self._retrieve_docs(question, on_phase)
         self._retrieve_code(question, on_phase)
+        self._tool_steps = self._run_tool_flow(question, on_phase)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
@@ -276,6 +287,160 @@ class RepoAgent:
         )
         self._ledger.record(meta)
         return meta.content
+
+    # --- автовызов инструментов ---------------------------------------------------------------
+
+    def _run_tool_flow(
+        self, question: str, on_phase: Optional[Callable[[RequestPhase], None]]
+    ) -> Tuple[mcp_tools.ToolStep, ...]:
+        """Выбирает инструменты моделью и выполняет шаги; возвращает выполненные шаги.
+
+        Флоу — один запрос выбора на раунд: продолжение запрашивается только пометкой `more`, иначе
+        разговор с моделью о инструментах стоил бы двух запросов на каждый вопрос. Ошибка выбора,
+        шага или исчерпание лимита останавливают флоу с названной причиной, и вопрос всё равно
+        уходит к модели — но уже без данных, которые получить не удалось.
+        """
+        hub = self.tool_hub
+        self._last_tool_flow = None
+        if not self.config.auto_tools or hub is None:
+            return ()
+        catalog = hub.catalog()
+        if not catalog:
+            return ()
+        try:
+            return self._flow_rounds(hub, question, on_phase)
+        finally:
+            # Соединения флоу закрываются вместе с вопросом: держать серверные процессы между
+            # вопросами значило бы держать их до конца сессии.
+            hub.close()
+
+    def _flow_rounds(
+        self, hub, question: str, on_phase: Optional[Callable[[RequestPhase], None]]
+    ) -> Tuple[mcp_tools.ToolStep, ...]:
+        """Раунды флоу: запрос выбора, шаги, при `more` — следующий раунд."""
+        views = hub.views()
+        steps: List[mcp_tools.ToolStep] = []
+        results: List[str] = []
+        rounds = 0
+        choice_requests = 0
+        dropped = 0
+        stop_reason = mcp_tools.FLOW_NO_TOOL
+        messages = mcp_tools.build_choice_messages(views, question)
+        while rounds < config.TOOL_FLOW_MAX_ROUNDS:
+            rounds += 1
+            self._signal(on_phase, RequestPhase.TOOL_CHOICE)
+            try:
+                meta = self.client.ask_with_usage_messages(
+                    messages,
+                    max_tokens=config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS),
+                    temperature=None,
+                    model=self.config.model,
+                )
+            except APIError as error:
+                stop_reason = mcp_tools.FLOW_CHOICE_FAILED.format(round=rounds, error=error)
+                break
+            self._ledger.record(meta)
+            choice_requests += 1
+            parsed = mcp_tools.parse_round(meta.content)
+            if parsed is mcp_tools.UNPARSED:
+                stop_reason = mcp_tools.FLOW_CHOICE_FAILED.format(
+                    round=rounds, error="ответ выбора не разобран"
+                )
+                break
+            if parsed is None:
+                stop_reason = mcp_tools.FLOW_DONE if steps else mcp_tools.FLOW_NO_TOOL
+                break
+            dropped += parsed.dropped
+            failed = False
+            for choice in parsed.steps:
+                if len(steps) >= config.TOOL_FLOW_MAX_STEPS:
+                    stop_reason = mcp_tools.FLOW_STEPS_LIMIT.format(
+                        limit=config.TOOL_FLOW_MAX_STEPS
+                    )
+                    failed = True
+                    break
+                step = self._execute_tool_step(choice, views, hub, results, steps, rounds, on_phase)
+                if step is None:
+                    stop_reason = mcp_tools.FLOW_STEP_FAILED.format(number=len(steps) + 1)
+                    failed = True
+                    break
+                steps.append(step)
+                results.append(step.text)
+            if failed:
+                break
+            if not parsed.more:
+                stop_reason = mcp_tools.FLOW_DONE
+                break
+            messages = mcp_tools.build_round_messages(views, question, steps)
+        else:
+            stop_reason = mcp_tools.FLOW_ROUNDS_LIMIT.format(limit=config.TOOL_FLOW_MAX_ROUNDS)
+
+        self._last_tool_flow = mcp_tools.ToolFlowReport(
+            question=question,
+            rounds=rounds,
+            choice_requests=choice_requests,
+            steps=tuple(steps),
+            stop_reason=stop_reason,
+            dropped=dropped,
+        )
+        return tuple(steps)
+
+    def _execute_tool_step(
+        self,
+        choice: mcp_tools.ToolChoice,
+        views,
+        hub,
+        results: List[str],
+        steps: List[mcp_tools.ToolStep],
+        round_number: int,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> Optional[mcp_tools.ToolStep]:
+        """Один шаг флоу: подстановка ссылок, маршрут по снимкам, вызов и проверка отказа.
+
+        Любая неудача — не исключение наружу, а причина остановки: данные, которых нет, не должны
+        превращаться в данные, которые «как-то» получились.
+        """
+        try:
+            arguments, sources = mcp_tools.resolve_references(choice.arguments, list(results))
+        except mcp_tools.ReferenceFailure:
+            return None
+        route = mcp_tools.route(views, choice.server, choice.tool)
+        if route.error:
+            return None
+        self._signal(on_phase, RequestPhase.MCP_TOOL)
+        try:
+            result = hub.call(route.server, choice.tool, arguments)
+        except (MCPError, KeyError):
+            return None
+        if result.is_error:
+            return None
+        return mcp_tools.ToolStep(
+            step=len(steps) + 1,
+            round=round_number,
+            server=route.server,
+            tool=choice.tool,
+            arguments=arguments,
+            sources=sources,
+            text=result.text,
+            rerouted_from=route.rerouted_from,
+        )
+
+    def tool_flow_report(self) -> Optional[mcp_tools.ToolFlowReport]:
+        """Снимок последнего флоу: раунды, шаги, число запросов выбора, причина остановки."""
+        return self._last_tool_flow
+
+    def _tool_message(self) -> Optional[Dict[str, str]]:
+        """Служебное сообщение с результатами инструментов: один вызов или цепочка шагов."""
+        if not self._tool_steps:
+            return None
+        if len(self._tool_steps) == 1:
+            step = self._tool_steps[0]
+            content = mcp_tools.tool_result_message(
+                step.server, step.tool, step.arguments, step.text
+            )
+        else:
+            content = mcp_tools.tool_chain_message(step.as_tuple() for step in self._tool_steps)
+        return {"role": "system", "content": content}
 
     def _retrieve_code(self, question: str, on_phase=None) -> None:
         """Ищет фрагменты исходников перед вопросом; сбой поиска вопрос не отменяет.
@@ -499,7 +664,7 @@ class RepoAgent:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)}
         ]
-        for message in (self._docs_message(), self._code_message()):
+        for message in (self._docs_message(), self._code_message(), self._tool_message()):
             if message is not None:
                 messages.append(message)
         if self._citations_enabled():
