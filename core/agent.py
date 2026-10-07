@@ -29,6 +29,7 @@ from . import (
     memory_layers,
     prompts,
     reranking,
+    schedule_store,
     task_state,
     user_profile,
 )
@@ -64,6 +65,25 @@ class CompressionReport:
     messages: int
     exchanges: int
     meta: Optional[AnswerMeta] = None
+
+
+@dataclass
+class ScheduleReport:
+    """Снимок расписания: задания, прогоны, объём собранного и прогоны, о которых не говорили."""
+
+    jobs: Tuple[object, ...] = ()
+    runs: Tuple[object, ...] = ()
+    collected_total: int = 0
+    path: str = ""
+    fresh: Tuple[object, ...] = ()
+
+    @property
+    def fresh_count(self) -> int:
+        return len(self.fresh)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for run in self.fresh if not getattr(run, "ok", True))
 
 
 @dataclass
@@ -152,6 +172,7 @@ class RepoAgent:
         task_provider: Optional[Callable[[], object]] = None,
         long_term: Optional[object] = None,
         profiles: Optional[object] = None,
+        schedule: Optional[object] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -200,6 +221,11 @@ class RepoAgent:
         self.profiles = profiles if profiles is not None else user_profile.ProfileStore()
         self._last_routing: tuple = ()
         self._last_invariants: Optional[object] = None
+        # Расписание пишет фоновый исполнитель, приложение только читает: курсор объявленных
+        # прогонов начинается с того, что уже лежит в файле, поэтому старт не выдаёт историю за новость.
+        self.schedule = schedule if schedule is not None else schedule_store.ScheduleStore()
+        self._announced = self.schedule.cursor()
+        self._last_schedule: Optional[ScheduleReport] = None
         self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
@@ -263,6 +289,7 @@ class RepoAgent:
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
         meta = self._ask_question(messages)
+        self._refresh_schedule()
         meta = self._enforce_invariants(messages, meta, on_phase)
         meta = self._enforce_citations(messages, meta, on_phase)
         self._remember(user_prompt, meta.content)
@@ -722,6 +749,35 @@ class RepoAgent:
         """Снимок правил домена и результата последней проверки ответа."""
         rules = tuple(getattr(self.domain, "invariants", ()) or ())
         return {"rules": rules, "check": self._last_invariants}
+
+    def schedule_report(self) -> "ScheduleReport":
+        """Снимок расписания: задания, прогоны, объём собранного и путь хранилища."""
+        self.schedule.reload()
+        return ScheduleReport(
+            jobs=self.schedule.jobs(),
+            runs=self.schedule.runs(),
+            collected_total=self.schedule.collected_total(),
+            path=str(getattr(self.schedule, "path", "")),
+        )
+
+    def _refresh_schedule(self) -> None:
+        """Ищет прогоны, которых пользователь ещё не видел, и сдвигает курсор."""
+        self.schedule.reload()
+        fresh = self.schedule.fresh_runs(self._announced)
+        if not fresh:
+            return
+        self._last_schedule = ScheduleReport(
+            jobs=self.schedule.jobs(),
+            runs=self.schedule.runs(),
+            collected_total=self.schedule.collected_total(),
+            path=str(getattr(self.schedule, "path", "")),
+            fresh=fresh,
+        )
+        self._announced = self.schedule.cursor()
+
+    @property
+    def last_schedule(self) -> Optional["ScheduleReport"]:
+        return self._last_schedule
 
     def record_usage(self, meta: AnswerMeta) -> None:
         """Учитывает расход запроса, выполненного вне пути вопроса (шаги конвейера задачи)."""

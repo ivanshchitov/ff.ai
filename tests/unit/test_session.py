@@ -663,3 +663,24 @@ def test_tool_command_help_lists_auto_and_flow(repo: Path):
     lines = session.run_command("/tool нет-такой-подкоманды").lines
     assert any("/tool auto on|off" in line for line in lines)
     assert any("/tool flow" in line for line in lines)
+
+
+# --- расписание ------------------------------------------------------------------------------
+
+
+def test_schedule_report_without_jobs(repo: Path):
+    session = _session(repo)
+    lines = session.run_command("/schedule").lines
+    assert any("Заданий: 0" in line for line in lines)
+    assert any("Заданий нет" in line for line in lines)
+
+
+def test_schedule_startup_line(repo: Path):
+    session = _session(repo)
+    line = session.schedule_startup_line()
+    assert "Планировщик" in line and "0 заданий" in line
+
+
+def test_schedule_announcement_is_empty_without_runs(repo: Path):
+    session = _session(repo)
+    assert session.schedule_announcement() == ()

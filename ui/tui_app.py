@@ -113,6 +113,7 @@ class DevAssistantTUI:
     def run(self) -> int:
         self._print_welcome()
         self._print_mcp_summary()
+        self._print_schedule_line()
         self._replay_history()
         try:
             while not self.session.exit_requested:
@@ -179,6 +180,7 @@ class DevAssistantTUI:
         self._print_memory_journal()
         self._print_warnings(answer.meta)
         self._print_usage_meta(answer.meta)
+        self._print_schedule_announcement()
 
     def _ask_with_spinner(self, question: str):
         """Вопрос под спиннером: фазы приходят событиями сессии, журнал собирается на экран."""
@@ -211,6 +213,15 @@ class DevAssistantTUI:
         body.append(f"\nМодель: {self.session.model}\n")
         body.append("Команды: /commands, /settings, /models, /domain, /context, /exit")
         self.console.print(Panel(body, title="ff.ai", style="cyan"))
+
+    def _print_schedule_line(self) -> None:
+        """Строка расписания при старте: что уже стоит в файле, без запуска заданий."""
+        self.console.print(f"[dim]{escape(self.session.schedule_startup_line())}[/dim]")
+
+    def _print_schedule_announcement(self) -> None:
+        """Объявление о прогонах планировщика: только о тех, которых пользователь ещё не видел."""
+        for line in self.session.schedule_announcement():
+            self.console.print(f"[dim]{escape(line)}[/dim]")
 
     def _print_mcp_summary(self) -> None:
         """Обход реестра при старте и одна строка сводки: подробности — по команде `/mcp`."""

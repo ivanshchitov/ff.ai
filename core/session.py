@@ -361,6 +361,8 @@ class AssistantSession:
                 return self._memory_command(argument)
             if command == "/profile":
                 return self._profile_command(argument)
+            if command == "/schedule":
+                return CommandResult(command="/schedule", lines=self.schedule_lines())
             if command == "/invariants":
                 return CommandResult(command="/invariants", lines=self.invariants_lines())
             if command == "/commands":
@@ -630,6 +632,58 @@ class AssistantSession:
     def invariants_report(self) -> Dict[str, object]:
         with self._lock:
             return self._agent.invariants_report()
+
+    def schedule_report(self):
+        """Снимок расписания: задания, прогоны и объём собранного — без запуска заданий."""
+        with self._lock:
+            return self._agent.schedule_report()
+
+    def schedule_startup_line(self) -> str:
+        """Строка старта: сколько заданий и прогонов уже в файле расписания."""
+        report = self.schedule_report()
+        return f"🗓 Планировщик: {len(report.jobs)} заданий, {len(report.runs)} прогонов"
+
+    def schedule_announcement(self) -> Tuple[str, ...]:
+        """Строки объявления о прогонах, которых пользователь ещё не видел."""
+        report = self._agent.last_schedule
+        if report is None or not report.fresh:
+            return ()
+        lines = [
+            f"🗓 Планировщик: прогонов {report.fresh_count}, "
+            f"сбоев {report.failed}; собрано всего: {report.collected_total}"
+        ]
+        for run in report.fresh:
+            mark = "✅" if getattr(run, "ok", True) else "⛔"
+            summary = str(getattr(run, "summary", "") or "")
+            lines.append(f"    {mark} задание {getattr(run, 'number', '')}: {summary}")
+        return tuple(lines)
+
+    def schedule_lines(self) -> Tuple[str, ...]:
+        """Отчёт о расписании: задания, последние прогоны и накопленное."""
+        report = self.schedule_report()
+        lines = [
+            f"Заданий: {len(report.jobs)}; прогонов: {len(report.runs)}; "
+            f"накоплено записей: {report.collected_total}",
+            f"Хранилище: {report.path or 'нет пути'}",
+        ]
+        if report.jobs:
+            lines.append("Задания:")
+            for job in report.jobs:
+                lines.append(
+                    f"    {job.number}. {job.tool} каждые {job.every_minutes} мин; "
+                    f"прогонов {job.runs}"
+                )
+        else:
+            lines.append("Заданий нет: их ставит модель автовызовом или /tool call.")
+        if report.runs:
+            lines.append("Последние прогоны:")
+            for run in report.runs[-5:]:
+                mark = "✅" if getattr(run, "ok", True) else "⛔"
+                lines.append(
+                    f"    {mark} задание {run.number}: "
+                    f"{getattr(run, 'summary', '')} (+{getattr(run, 'fresh', 0)})"
+                )
+        return tuple(lines)
 
     def memory_lines(self) -> Tuple[str, ...]:
         """Отчёт о слоях памяти: обмены, рабочая память, долговременные записи и правила."""
