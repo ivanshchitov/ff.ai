@@ -1,0 +1,25 @@
+# Окружение и секреты
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Состояние пользователя и выгрузки — по умолчанию вне репозитория;
+# эти строки нужны, если пути переопределены в каталог проекта
+history.json
+memory.json
+profile.json
+task.json
+schedule.json
+tasks/
+reports/
+exports/
+
+# Логи локального llama-server
+llama_server/server.log
+
+# Инструменты
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
