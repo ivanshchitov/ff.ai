@@ -1,0 +1,80 @@
+{
+  "strategy": "structural",
+  "include_extensions": [
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".c",
+    ".qml",
+    ".js",
+    ".pro",
+    ".pri",
+    ".prf",
+    ".spec",
+    ".cmake",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".conf",
+    ".ini",
+    ".sh"
+  ],
+  "exclude_globs": [
+    "build",
+    "build-*",
+    "build/*",
+    "build-*/*",
+    ".aurora",
+    ".aurora/*",
+    "vendor",
+    "vendor/*",
+    "*/.git",
+    ".git",
+    "*.lock",
+    "*.patch",
+    "*.diff",
+    "*.qm",
+    "*.ts",
+    "*.svg",
+    "*.png",
+    "*.jpg",
+    "*.ico",
+    "*.desktop"
+  ],
+  "max_file_bytes": 262144,
+  "fixed": {
+    "chunk_lines": 60,
+    "overlap_lines": 10
+  },
+  "structural": {
+    "max_lines": 120,
+    "merge_below_lines": 12
+  },
+  "block_patterns": {
+    "cpp": [
+      "^(class|struct|enum|namespace|union)\\s+[A-Za-z_]",
+      "^(template\\s*<[^>]*>\\s*)?[A-Za-z_~][\\w:<>,\\s*&~]*\\([^;{}]*\\)\\s*(const)?\\s*(override|final)?\\s*(noexcept)?\\s*\\{\\s*$",
+      "^[A-Za-z_][\\w]*::[A-Za-z_][\\w]*\\s*\\([^;{}]*\\)\\s*(const)?\\s*\\{\\s*$",
+      "^(Q_OBJECT|Q_PROPERTY|Q_INVOKABLE|signals|public|private|protected)\\s*:?\\s*$"
+    ],
+    "qml": [
+      "^(import|pragma)\\s",
+      "^[A-Z][A-Za-z0-9_.]*\\s*\\{",
+      "^\\s*(Component|Connections|Timer|ListView|Repeater|QtObject)\\s*\\{"
+    ],
+    "spec": [
+      "^(Name|Version|Release|Summary|License|Group|URL|Source|BuildRequires|Requires|Requires\\(|BuildArch|%description|%prep|%build|%install|%files|%changelog|%post|%postun|%trigger)\\b"
+    ],
+    "make": [
+      "^[A-Za-z_][\\w.-]*\\s*[:+?]?=",
+      "^[A-Za-z_][\\w.-]*\\s*:"
+    ],
+    "shell": [
+      "^(function\\s+)?[A-Za-z_][\\w]*\\s*\\(\\)\\s*\\{",
+      "^(if|for|while|case|fi|done|esac)\\b"
+    ]
+  }
+}

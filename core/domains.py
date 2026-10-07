@@ -88,6 +88,55 @@ class DocsTools:
 
 
 @dataclass(frozen=True)
+class DomainCorpus:
+    """Корпус кода домена: что считать исходниками и как резать их на фрагменты.
+
+    Расширения, исключения, пределы и признаки начала блока принадлежат предметной области:
+    у другой платформы другой набор файлов и другая структура. Ядро читает правила отсюда и
+    не знает ни одного расширения.
+    """
+
+    strategy: str
+    include_extensions: Tuple[str, ...]
+    exclude_globs: Tuple[str, ...]
+    max_file_bytes: int
+    fixed_chunk_lines: int
+    fixed_overlap_lines: int
+    structural_max_lines: int
+    structural_merge_below: int
+    block_patterns: Tuple[Tuple[str, Tuple[str, ...]], ...]
+
+    def patterns_for(self, suffix: str) -> Tuple[str, ...]:
+        """Признаки начала блока для расширения файла: расширения без семьи получают общий набор."""
+        key = _FAMILY_BY_SUFFIX.get(suffix, "")
+        for family, patterns in self.block_patterns:
+            if family == key:
+                return patterns
+        return ()
+
+
+# Семьи файлов: расширение → набор признаков структуры. Таблица нужна потому, что правил
+# больше, чем семейств (.h/.hpp/.cc — один и тот же C++), а сами признаки остаются данными.
+_FAMILY_BY_SUFFIX = {
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".h": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".c": "cpp",
+    ".qml": "qml",
+    ".js": "qml",
+    ".spec": "spec",
+    ".pro": "make",
+    ".pri": "make",
+    ".prf": "make",
+    ".cmake": "make",
+    ".sh": "shell",
+}
+
+
+@dataclass(frozen=True)
 class DomainDocs:
     """Корпус документации домена: какой сервер читать и как по нему искать.
 
@@ -121,6 +170,8 @@ class Domain:
     tools_path: Optional[Path] = None
     # Корпус документации домена: сервер, разделы, слова-признаки версий и имена инструментов.
     docs: Optional[DomainDocs] = None
+    # Корпус кода домена: расширения исходников, исключения и правила разбиения на фрагменты.
+    corpus: Optional[DomainCorpus] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -270,6 +321,54 @@ def _load_docs(path: Path) -> Optional[DomainDocs]:
     )
 
 
+def _load_corpus(path: Path) -> Optional[DomainCorpus]:
+    """Необязательный раздел пакета: корпус кода домена.
+
+    Отсутствие файла означает «у домена нет правил отбора исходников» — тогда корпус кода просто
+    не строится. Сломанный файл обязан остановить загрузку: иначе индекс молча соберётся не по тем
+    файлам, и цитаты будут указывать не туда.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+
+    def _strings(key: str) -> Tuple[str, ...]:
+        raw = _require(data, key, path, list)
+        if any(not isinstance(item, str) or not item.strip() for item in raw):
+            raise DomainSchemaError(f"{path}: поле «{key}» должно быть списком непустых строк")
+        return tuple(item.strip() for item in raw)
+
+    fixed = _require(data, "fixed", path, dict)
+    structural = _require(data, "structural", path, dict)
+    raw_patterns = data.get("block_patterns", {})
+    if not isinstance(raw_patterns, dict):
+        raise DomainSchemaError(f"{path}: поле «block_patterns» должно быть объектом")
+    patterns = []
+    for family, raw in raw_patterns.items():
+        if not isinstance(raw, list) or any(not isinstance(item, str) or not item for item in raw):
+            raise DomainSchemaError(
+                f"{path}: признаки блока семьи «{family}» должны быть списком непустых строк"
+            )
+        patterns.append((str(family), tuple(raw)))
+
+    corpus = DomainCorpus(
+        strategy=str(data.get("strategy", "structural")),
+        include_extensions=_strings("include_extensions"),
+        exclude_globs=_strings("exclude_globs"),
+        max_file_bytes=int(_require(data, "max_file_bytes", path, int)),
+        fixed_chunk_lines=int(_require(fixed, "chunk_lines", path, int)),
+        fixed_overlap_lines=int(fixed.get("overlap_lines", 0)),
+        structural_max_lines=int(_require(structural, "max_lines", path, int)),
+        structural_merge_below=int(structural.get("merge_below_lines", 0)),
+        block_patterns=tuple(patterns),
+    )
+    if corpus.strategy not in ("fixed", "structural"):
+        raise DomainSchemaError(f"{path}: неизвестная стратегия разбиения {corpus.strategy!r}")
+    if corpus.fixed_overlap_lines >= corpus.fixed_chunk_lines:
+        raise DomainSchemaError(f"{path}: перекрытие окон не меньше самого окна")
+    return corpus
+
+
 def available_domains(domains_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """Идентификаторы установленных пакетов — по каталогам с `domain.json`."""
     root = Path(domains_dir or config.DOMAINS_DIR)
@@ -311,6 +410,7 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         servers=_load_servers(path / "servers.json"),
         tools_path=(path / "tools.json") if (path / "tools.json").is_file() else None,
         docs=_load_docs(path / "docs.json"),
+        corpus=_load_corpus(path / "corpus.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

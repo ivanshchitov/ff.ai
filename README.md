@@ -30,9 +30,10 @@ cd /path/to/aurora-project            # целевой репозиторий п
 | Управление корпусом | `/docs` — отчёт о поиске, `/docs mode on|off`, `/docs version <версия>`, `/docs trace` |
 | Отбор кандидатов | вторая ступень: кандидаты оценивает модель, до запроса доходят только прошедшие порог; `/docs retrieval baseline\|enhanced`, `/docs threshold <0..1>` |
 | Инструменты репозитория | `/tool` — перечень инструментов с параметрами, `/tool call repo_search query=…` — ручной вызов |
+| Корпус кода | индекс исходников целевого репозитория: `/code index [fixed\|structural]`, `/code status`, `/code compare`; лежит в кэше состояния, в репозиторий не пишется |
 
 Команды: `/commands`, `/settings`, `/models`, `/clear`, `/usage`, `/context`, `/branches`,
-`/domain`, `/docs`, `/mcp`, `/tool`, `/exit` (автодополнение по Tab).
+`/domain`, `/docs`, `/code`, `/mcp`, `/tool`, `/exit` (автодополнение по Tab).
 
 Флаги: `--repo <путь>` (по умолчанию текущий каталог), `--domain <id>`, `--version`.
 

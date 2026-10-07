@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import config, docs_reranking, domains, mcp_registry
+from . import code_index, config, docs_reranking, domains, mcp_registry
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
@@ -146,6 +146,8 @@ class AssistantSession:
         )
         self._mcp_specs: Tuple[MCPServerSpec, ...] = ()
         self._mcp_connections: Tuple[MCPConnection, ...] = ()
+        # Снимок последней сборки корпуса кода: нужен, чтобы отчёт печатался без повторного чтения.
+        self._last_code_report: Optional[code_index.IndexReport] = None
         self._agent = RepoAgent(
             domain=self._selection.domain,
             client=client,
@@ -292,6 +294,8 @@ class AssistantSession:
                 return self._domain_command(argument)
             if command == "/docs":
                 return self._docs_command(argument)
+            if command == "/code":
+                return self._code_command(argument)
             if command == "/mcp":
                 return self._mcp_command(argument)
             if command == "/tool":
@@ -650,6 +654,87 @@ class AssistantSession:
             f"запросов — {total.requests}, всего — {total.total_tokens} токенов"
         )
         return tuple(lines)
+
+    # --- корпус кода: сборка, состояние, сравнение стратегий --------------------------------
+
+    def _code_command(self, argument: str) -> CommandResult:
+        """`/code index [стратегия]`, `/code status`, `/code compare` — без обращений к модели.
+
+        Сборка синхронная: индекс небольшого проекта собирается мгновенно, а большой проект
+        пользователь собирает осознанно. Ошибка сборки не затирает прежний индекс — она просто
+        видна строкой отчёта.
+        """
+        tokens = argument.split()
+        action = tokens[0] if tokens else "status"
+        corpus = getattr(self.domain, "corpus", None)
+        if corpus is None:
+            return CommandResult(
+                command="/code", lines=("Домен не объявляет корпус кода.",)
+            )
+        if action == "index":
+            strategy = tokens[1] if len(tokens) > 1 else corpus.strategy
+            try:
+                report = code_index.build_index(
+                    self.root, corpus, strategy, config.repo_index_file(self.root)
+                )
+            except code_index.CodeIndexError as error:
+                return CommandResult(
+                    command="/code",
+                    lines=(
+                        f"Индекс не собран: {error}",
+                        "Прежний индекс (если был) остался на месте.",
+                    ),
+                )
+            self._last_code_report = report
+            return CommandResult(command="/code", lines=self.code_lines())
+        if action == "compare":
+            return CommandResult(command="/code", lines=self._code_compare_lines(corpus))
+        if action != "status":
+            return CommandResult(
+                command="/code",
+                lines=(
+                    "Форма команды: /code index [fixed|structural], /code status, /code compare",
+                ),
+            )
+        return CommandResult(command="/code", lines=self.code_lines())
+
+    def code_lines(self) -> Tuple[str, ...]:
+        """Отчёт о корпусе кода: путь индекса, стратегия, время сборки, файлы, фрагменты, пропуски."""
+        if getattr(self.domain, "corpus", None) is None:
+            return ("Домен не объявляет корпус кода.",)
+        report = self._last_code_report
+        database = config.repo_index_file(self.root)
+        if report is None or report.database != database:
+            report = code_index.read_index(database)
+        if report is None:
+            return (
+                f"Индекса нет. Путь: {database}",
+                "Собрать: /code index [fixed|structural]; сравнить стратегии: /code compare",
+            )
+        lines = [
+            f"Индекс: {report.database}",
+            f"Стратегия: {report.strategy}; собран: {report.built_at_text}; "
+            f"список файлов: {report.source}",
+            f"Файлов: {report.files}; фрагментов: {report.chunks}; "
+            f"строк во фрагментах: {report.lines}; объём: {report.size_bytes} симв.",
+        ]
+        reasons = report.skip_reasons()
+        if reasons:
+            summary = ", ".join(f"{reason} — {count}" for reason, count in sorted(reasons.items()))
+            lines.append(f"Пропущено: {summary}")
+        return tuple(lines)
+
+    def _code_compare_lines(self, corpus) -> Tuple[str, ...]:
+        """Сравнение стратегий разбиения: число фрагментов и примеры границ, без записи индекса."""
+        lines: List[str] = ["Сравнение стратегий разбиения:"]
+        for strategy in code_index.STRATEGIES:
+            chunks = code_index.collect(self.root, corpus, strategy)
+            lines.append(f"    {strategy}: фрагментов — {len(chunks)}")
+            for label in code_index.sample_labels(chunks):
+                lines.append(f"        {label}")
+        lines.append("Индекс не изменялся: /code index <стратегия> собирает выбранную.")
+        return tuple(lines)
+
 
     def _mcp_command(self, argument: str) -> CommandResult:
         """`/mcp` — отчёт о подключениях, `/mcp refresh` — обойти реестр заново."""
