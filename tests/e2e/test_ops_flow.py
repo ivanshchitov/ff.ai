@@ -140,9 +140,12 @@ def test_sign_without_passphrase_is_unavailable(app_with_sdk):
 
 
 def test_install_requires_a_verified_signature(app_with_sdk):
+    """Пакет должен существовать: без сборки устанавливать нечего, и причина — «пакета нет»."""
     app, tool = app_with_sdk
     app.send_line("/ops target armv7hl")
     app.wait_for("Выбрано:", timeout=LIVE)
+    app.send_line("/ops build")
+    app.wait_for("✅", timeout=LIVE + 30)
     app.send_line("/ops install")
     assert "подпись пакета не подтверждена" in app.wait_for(
         "подпись пакета не подтверждена", timeout=LIVE
