@@ -35,6 +35,7 @@ from core import config, task_state
 from core.agent import CompressionReport, FactsReport, RequestPhase
 from core.answer_settings import AnswerFormat, ContextStrategy
 from core.api_client import APIError, AnswerMeta, is_valid_api_key, is_valid_json_answer
+from core import invariants, memory_layers
 from core.session import AssistantSession, JournalLine, PhaseChanged
 
 from . import branches_screen, commands_screen, keyboard, models_screen, settings_screen
@@ -98,9 +99,13 @@ class DevAssistantTUI:
         self._journal: List[str] = []
         self._printed_compression: Optional[CompressionReport] = None
         self._printed_facts: Optional[FactsReport] = None
+        self.session.set_profile_interview(self._run_profile_setup)
         self._run_phase: str = ""
         # Подтверждение записи в репозиторий даёт только интерфейс: без него патчи не применяются.
         self.session.set_patch_confirmation(self._confirm_patch)
+        # Конвейер операций: процессы запускает приложение, необратимые шаги подтверждает оно же.
+        self.session.set_ops_runner(self._run_process)
+        self.session.set_ops_confirmation(self._confirm_ops_step)
         self._register_autocomplete()
 
     # --- основной цикл -------------------------------------------------------------------
@@ -171,6 +176,7 @@ class DevAssistantTUI:
         self._print_docs_journal()
         self._print_code_journal()
         self._print_tool_journal()
+        self._print_memory_journal()
         self._print_warnings(answer.meta)
         self._print_usage_meta(answer.meta)
 
@@ -525,6 +531,38 @@ class DevAssistantTUI:
             if key and key not in (keyboard.ESC, keyboard.UP, keyboard.DOWN):
                 typed.append(key)
 
+    def _run_process(self, argv, cwd, timeout):
+        """Запуск процесса конвейера: списком аргументов, без оболочки, со снимком времени."""
+        import subprocess
+
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                list(argv),
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, f"превышено время ожидания ({timeout} с)", time.monotonic() - started
+        except OSError as error:
+            return 127, str(error), time.monotonic() - started
+        output = (completed.stdout or "") + (completed.stderr or "")
+        return completed.returncode, output, time.monotonic() - started
+
+    def _confirm_ops_step(self, step: str, description: str) -> bool:
+        """Подтверждение необратимого шага конвейера: один ответ, чтение вне построчного ввода."""
+        self.console.print(f"[bold]Шаг «{escape(step)}»: {escape(description)}[/bold]")
+        self.console.print("Выполнить? y — да, n — нет")
+        try:
+            with keyboard.raw_mode():
+                key = keyboard.read_char().strip().casefold()
+        except KeyboardInterrupt:
+            return False
+        return key in ("y", "н", "д")
+
     def _confirm_patch(self, summary: str, patch_text: str) -> bool:
         """Подтверждение записи в репозиторий: показывает патч и читает один ответ."""
         self.console.print(f"[bold]Патч к применению: {escape(summary)}[/bold]")
@@ -562,10 +600,67 @@ class DevAssistantTUI:
             f"Стратегия: {STRATEGY_LABELS[settings.context_strategy]}  |  "
             f"Объём: {settings.max_words} слов  |  "
             + self._task_status_fragment()
+            + self._memory_status_fragment()
             + f"Команды: {' '.join(STATUS_COMMANDS)}  |  "
             f"Сессия: {usage.total_tokens} ток., {cost}[/dim]"
         )
         self.console.print(Rule(style="dim"))
+
+    def _memory_status_fragment(self) -> str:
+        """Цель задачи и имя активного профиля — только когда они есть: иначе layout не меняется."""
+        parts = []
+        goal = str(self.session.memory_report().get("goal", "") or "")
+        if goal:
+            parts.append(f"Цель: «{escape(goal)}»")
+        name = str(self.session.profile_report().get("active", "") or "")
+        if name:
+            parts.append(f"Профиль: {escape(name)}")
+        return ("  |  " + "  |  ".join(parts)) if parts else ""
+
+    def _print_memory_journal(self) -> None:
+        """Журнал памяти и правил: строки только об отклонениях и о сделанных записях."""
+        for record in self.session.agent_routing():
+            layer = memory_layers.LAYER_LABELS.get(record.layer, record.layer)
+            self.console.print(
+                f"[dim]🧠 Память ({escape(layer)}, {escape(record.key)}): "
+                f"{escape(record.value)}[/dim]"
+            )
+        violations = self.session.agent_invariants()
+        if violations:
+            for item in violations:
+                self.console.print(
+                    f"[bold red]⛔ Инвариант {item.number} нарушен («{escape(item.term)}»): "
+                    f"ответ заменён[/bold red]"
+                )
+            self.console.print(f"[dim]{escape(invariants.refusal_text(violations))}[/dim]")
+
+    def _run_profile_setup(self) -> None:
+        """Опросник профиля: вопросы печатаются, ответы читаются построчно.
+
+        `readline`, а не `input()`: прерывание не должно обрывать приложение — оно отменяет только
+        настройку профиля.
+        """
+        questions = self.session.profile_questions()
+        if not questions:
+            self.console.print("[bold yellow]Домен не объявляет разделов профиля.[/bold yellow]")
+            return
+        answers: list = []
+        self.console.print(
+            "[dim]Настройка профиля: пустой ответ оставляет раздел как был, Ctrl+C отменяет.[/dim]"
+        )
+        try:
+            for field, prompt, default in questions:
+                suffix = f" [{escape(default)}]" if default else ""
+                self.console.print(f"{escape(prompt)}{suffix}")
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                answers.append((field, line.strip()))
+        except KeyboardInterrupt:
+            self.console.print("[bold yellow]Настройка профиля отменена.[/bold yellow]")
+            return
+        name = self.session.save_profile(answers)
+        self.console.print(f"[bold green]Профиль «{escape(name)}» настроен.[/bold green]")
 
     def _task_status_fragment(self) -> str:
         """Строка задачи в статус-баре: только пока задача незавершена — иначе layout не меняется."""
@@ -599,7 +694,8 @@ class DevAssistantTUI:
 
     def _ensure_api_key(self) -> bool:
         """Ключ проверяется и когда он пришёл из .env: непригодный оборвал бы первый запрос."""
-        if self.session.has_usable_api_key():
+        if self.session.has_usable_api_key() or config.is_local_model(self.session.model):
+            # Локальному пресету ключ не нужен: запрос уходит на llama.cpp без авторизации.
             return True
         while True:
             self.console.print(

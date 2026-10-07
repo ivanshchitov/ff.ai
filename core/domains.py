@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import config
+from . import config, memory_layers
 from .mcp_registry import MCPServerSpec
 
 SCHEMA_VERSION = 1
@@ -80,6 +80,60 @@ class Invariant:
 
 
 @dataclass(frozen=True)
+class MemoryRule:
+    """Правило маршрутизации памяти: образец реплики, слой, категория и ключ записи.
+
+    Образец — регулярное выражение, ищется по реплике без учёта регистра (поэтому кириллица
+    распознаётся в любом регистре). Значением записи становится предложение реплики, в котором
+    образец сработал. Порядок правил значим: правило ниже заменяет значение того же ключа.
+    """
+
+    layer: str
+    category: str
+    key: str
+    pattern: str
+    description: str
+
+
+@dataclass(frozen=True)
+class DomainMemory:
+    """Правила слоёв памяти домена: что и по какой реплике запоминается."""
+
+    rules: Tuple[MemoryRule, ...]
+    # Ключ цели рабочей памяти: «цель» — слово домена, в ядре его быть не должно.
+    goal_key: str
+    goal_category: str
+
+
+@dataclass(frozen=True)
+class ProfileSection:
+    """Раздел профиля домена: машинное имя, подпись, вопрос опросника и значение по умолчанию.
+
+    Значение по умолчанию подставляется, когда вопрос пропущен, а раздела у профиля ещё нет:
+    так домен задаёт, каким он хочет видеть ответ, если пользователь ничего о себе не сказал.
+    """
+
+    id: str
+    label: str
+    question: str
+    default: str = ""
+
+
+@dataclass(frozen=True)
+class DomainProfile:
+    """Разделы профиля домена и вопрос об имени профиля.
+
+    Имя — не раздел профиля: оно различает профили в файле, поэтому текст вопроса и заготовка
+    свободного имени объявлены отдельно от разделов.
+    """
+
+    name_label: str
+    name_question: str
+    name_prefix: str
+    sections: Tuple[ProfileSection, ...]
+
+
+@dataclass(frozen=True)
 class DocsTools:
     """Имена инструментов сервера документации: они тоже данные, а не код ядра."""
 
@@ -97,6 +151,44 @@ class ForbiddenRule:
 
     def matches(self, line: str) -> bool:
         return re.search(self.pattern, line) is not None
+
+
+@dataclass(frozen=True)
+class DomainOps:
+    """Правила конвейера операций: инструмент, цели, команды шагов и запреты.
+
+    Команды, пути и признаки подписи принадлежат предметной области: у другой платформы другой
+    SDK. Ядро не знает ни одного имени команды — оно подставляет значения в шаблоны пакета.
+    """
+
+    tool_env: str
+    tool_default: str
+    target_pattern: str
+    architectures: Tuple[Tuple[str, str], ...]
+    default_architecture: str
+    state_dir: str
+    steps: Tuple[Tuple[str, Tuple[str, ...]], ...]
+    package_globs: Tuple[str, ...]
+    # Образцы имени приложения: оформление пакета принадлежит домену, в ядре таких образцов нет.
+    app_id_globs: Tuple[str, ...]
+    signature_key_env: str
+    signature_signed: Tuple[str, ...]
+    signature_unsigned: Tuple[str, ...]
+    forbidden_commands: Tuple[str, ...]
+    package_check: Tuple[str, ...]
+
+    def step(self, name: str) -> Tuple[str, ...]:
+        """Шаблон шага по имени; неизвестный шаг — пустой шаблон, а не догадка."""
+        for step_name, template in self.steps:
+            if step_name == name:
+                return template
+        return ()
+
+    def architecture_note(self, arch: str) -> str:
+        for name, note in self.architectures:
+            if name == arch:
+                return note
+        return ""
 
 
 @dataclass(frozen=True)
@@ -202,6 +294,12 @@ class Domain:
     corpus: Optional[DomainCorpus] = None
     # Правила детерминированной проверки артефакта задачи (P6).
     checks: Optional[DomainChecks] = None
+    # Правила конвейера операций над проектом (P7).
+    ops: Optional[DomainOps] = None
+    # Правила маршрутизации слоёв памяти (P8).
+    memory: Optional[DomainMemory] = None
+    # Разделы профиля пользователя и вопрос об имени (P8).
+    profile: Optional[DomainProfile] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -296,6 +394,113 @@ def _load_invariants(path: Path) -> Tuple[Invariant, ...]:
     if not invariants:
         raise DomainSchemaError(f"{path}: список «invariants» пуст")
     return tuple(invariants)
+
+
+def _load_memory(path: Path) -> Optional[DomainMemory]:
+    """Необязательный раздел пакета: правила маршрутизации слоёв памяти.
+
+    Отсутствие файла означает «домен не объявляет правил памяти» — тогда записи делают только
+    явные команды пользователя. Сломанный файл обязан остановить загрузку: правило с опечаткой
+    молча не срабатывало бы, и запись пропадала бы без следа.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+    raw = _require(data, "rules", path, list)
+    if not raw:
+        raise DomainSchemaError(f"{path}: список «rules» пуст")
+    rules: List[MemoryRule] = []
+    for index, item in enumerate(raw):
+        where = f"{path}: правило #{index + 1}"
+        if not isinstance(item, dict):
+            raise DomainSchemaError(f"{where} должно быть объектом")
+        values: Dict[str, str] = {}
+        for key in ("layer", "category", "key", "pattern", "description"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise DomainSchemaError(f"{where}: поле «{key}» должно быть непустой строкой")
+            values[key] = value.strip()
+        if values["layer"] not in memory_layers.STORABLE_LAYERS:
+            allowed = ", ".join(memory_layers.STORABLE_LAYERS)
+            raise DomainSchemaError(
+                f"{where}: слой {values['layer']!r} не поддерживается (доступны: {allowed})"
+            )
+        try:
+            re.compile(values["pattern"])
+        except re.error as error:
+            raise DomainSchemaError(
+                f"{where}: образец {values['pattern']!r} не компилируется ({error})"
+            ) from error
+        rules.append(MemoryRule(**values))
+    goal_key = str(data.get("goal_key", "")).strip()
+    goal_category = str(data.get("goal_category", "")).strip()
+    if not goal_key or not goal_category:
+        raise DomainSchemaError(
+            f"{path}: нужны «goal_key» и «goal_category» — ключ цели рабочей памяти"
+        )
+    return DomainMemory(rules=tuple(rules), goal_key=goal_key, goal_category=goal_category)
+
+
+_SECTION_ID_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def _load_profile(path: Path) -> Optional[DomainProfile]:
+    """Необязательный раздел пакета: разделы профиля пользователя и вопрос об имени.
+
+    Отсутствие файла означает «домен не объявляет профиля» — тогда персонализации нет. Сломанный
+    файл обязан остановить загрузку: раздел без подписи или с нечитаемым именем дал бы профиль,
+    который нельзя ни показать, ни сохранить.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+
+    def _text(key: str) -> str:
+        value = str(_require(data, key, path, str)).strip()
+        if not value:
+            raise DomainSchemaError(f"{path}: поле «{key}» не должно быть пустым")
+        return value
+
+    raw = _require(data, "sections", path, list)
+    if not raw:
+        raise DomainSchemaError(f"{path}: список «sections» пуст")
+    sections: List[ProfileSection] = []
+    seen: List[str] = []
+    for index, item in enumerate(raw):
+        where = f"{path}: раздел #{index + 1}"
+        if not isinstance(item, dict):
+            raise DomainSchemaError(f"{where} должен быть объектом")
+        section_id = item.get("id")
+        if not isinstance(section_id, str) or not _SECTION_ID_RE.fullmatch(section_id):
+            raise DomainSchemaError(
+                f"{where}: поле «id» должно быть латинским именем (строчные буквы, цифры, «_»)"
+            )
+        if section_id in seen:
+            raise DomainSchemaError(f"{where}: раздел «{section_id}» объявлен дважды")
+        seen.append(section_id)
+        label = item.get("label")
+        question = item.get("question")
+        if not isinstance(label, str) or not label.strip():
+            raise DomainSchemaError(f"{where}: поле «label» должно быть непустой строкой")
+        if not isinstance(question, str) or not question.strip():
+            raise DomainSchemaError(f"{where}: поле «question» должно быть непустой строкой")
+        default = item.get("default", "")
+        if not isinstance(default, str):
+            raise DomainSchemaError(f"{where}: поле «default» должно быть строкой")
+        sections.append(
+            ProfileSection(
+                id=section_id,
+                label=label.strip(),
+                question=question.strip(),
+                default=default.strip(),
+            )
+        )
+    return DomainProfile(
+        name_label=_text("name_label"),
+        name_question=_text("name_question"),
+        name_prefix=_text("name_prefix"),
+        sections=tuple(sections),
+    )
 
 
 def _load_servers(path: Path) -> Tuple[MCPServerSpec, ...]:
@@ -449,6 +654,76 @@ def _load_checks(path: Path) -> Optional[DomainChecks]:
     )
 
 
+def _load_ops(path: Path) -> Optional[DomainOps]:
+    """Необязательный раздел пакета: правила конвейера операций.
+
+    Отсутствие файла означает, что домен не объявляет конвейера — тогда операции над проектом
+    недоступны. Сломанный файл обязан остановить загрузку: молча собранная не та команда — это
+    сборка не того пакета и подпись не тем ключом.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+
+    def _strings(key: str) -> Tuple[str, ...]:
+        raw = data.get(key, [])
+        if not isinstance(raw, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw
+        ):
+            raise DomainSchemaError(f"{path}: поле «{key}» должно быть списком непустых строк")
+        return tuple(item.strip() for item in raw)
+
+    def _template(key: str) -> Tuple[str, ...]:
+        raw = data.get(key)
+        if not isinstance(raw, list) or not raw or any(
+            not isinstance(item, str) or not item.strip() for item in raw
+        ):
+            raise DomainSchemaError(f"{path}: поле «{key}» должно быть непустым списком строк")
+        return tuple(item.strip() for item in raw)
+
+    tool = _require(data, "tool", path, dict)
+    raw_arch = _require(data, "architectures", path, dict)
+    architectures = []
+    for name, note in raw_arch.items():
+        if not str(name).strip() or not str(note).strip():
+            raise DomainSchemaError(f"{path}: у архитектуры нужны имя и пояснение")
+        architectures.append((str(name).strip(), str(note).strip()))
+    if not architectures:
+        raise DomainSchemaError(f"{path}: список архитектур пуст")
+    raw_steps = _require(data, "steps", path, dict)
+    steps = []
+    for name, value in raw_steps.items():
+        if not isinstance(value, list) or not value:
+            raise DomainSchemaError(f"{path}: шаг «{name}» должен быть непустым списком строк")
+        if any(not isinstance(part, str) or not part.strip() for part in value):
+            raise DomainSchemaError(f"{path}: шаг «{name}» содержит пустую часть команды")
+        steps.append((str(name), tuple(str(part).strip() for part in value)))
+    if not steps:
+        raise DomainSchemaError(f"{path}: конвейер не объявляет ни одного шага")
+    signature = data.get("signature", {})
+    if not isinstance(signature, dict):
+        raise DomainSchemaError(f"{path}: поле «signature» должно быть объектом")
+    default_arch = str(data.get("default_architecture", "")).strip()
+    if default_arch and default_arch not in {name for name, _ in architectures}:
+        raise DomainSchemaError(f"{path}: архитектура по умолчанию {default_arch!r} не объявлена")
+    return DomainOps(
+        tool_env=str(_require(tool, "env", path, str)).strip(),
+        tool_default=str(_require(tool, "default", path, str)).strip(),
+        target_pattern=str(_require(data, "target_pattern", path, str)).strip(),
+        architectures=tuple(architectures),
+        default_architecture=default_arch or architectures[0][0],
+        state_dir=str(data.get("state_dir", ".aurora")).strip() or ".aurora",
+        steps=tuple(steps),
+        package_globs=_strings("package_globs"),
+        app_id_globs=_strings("app_id_globs"),
+        signature_key_env=str(signature.get("key_env", "")).strip(),
+        signature_signed=tuple(str(item) for item in signature.get("signed_markers", []) if str(item)),
+        signature_unsigned=tuple(str(item) for item in signature.get("unsigned_markers", []) if str(item)),
+        forbidden_commands=_strings("forbidden_commands"),
+        package_check=tuple(str(part) for part in data.get("package_check_command", []) if str(part)),
+    )
+
+
 def available_domains(domains_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """Идентификаторы установленных пакетов — по каталогам с `domain.json`."""
     root = Path(domains_dir or config.DOMAINS_DIR)
@@ -492,6 +767,9 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         docs=_load_docs(path / "docs.json"),
         corpus=_load_corpus(path / "corpus.json"),
         checks=_load_checks(path / "validation.json"),
+        ops=_load_ops(path / "ops.json"),
+        memory=_load_memory(path / "memory.json"),
+        profile=_load_profile(path / "profile.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

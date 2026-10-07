@@ -67,6 +67,14 @@ def _agent(repo: Path, client, retriever=None, history_path: Path = None) -> Rep
     )
 
 
+def sans_invariants(messages) -> list:
+    """Сообщения без правил домена: они входят в каждый запрос и мешают проверкам формы."""
+    from core import invariants
+
+    text = invariants.invariants_message(load_domain("aurora-qt5").invariants)
+    return [message for message in messages if message.get("content") != text]
+
+
 def answer_calls(client) -> list:
     """Запросы ответа, без служебного запроса оценки: тесты про путь ответа считают именно их."""
     return [call for call in client.calls if "оцениваешь" not in call[0]["content"]]
@@ -162,7 +170,9 @@ def test_disabled_mode_does_not_search_or_inject(repo: Path, docs_fragment):
     agent.config.docs_enabled = False
     agent.ask("вопрос")
     assert retriever.queries == []
-    assert len(client.calls[0]) == 2, "без поиска в запросе только система и вопрос"
+    assert len(sans_invariants(client.calls[0])) == 2, (
+        "без поиска в запросе только система и вопрос (правила домена идут всегда)"
+    )
     assert agent.docs_report() is None
 
 

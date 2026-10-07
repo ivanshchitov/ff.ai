@@ -28,16 +28,18 @@ class ModelSelectionState:
 
     @property
     def available(self) -> List[str]:
-        return config.AVAILABLE_MODELS
+        """Облачные модели и локальные пресеты: список целиком из конфигурации."""
+        return config.model_choices()
 
     @property
     def selected(self) -> str:
-        return config.AVAILABLE_MODELS[self.selected_index]
+        return self.available[self.selected_index]
 
 
 def initial_state(current_model: str) -> ModelSelectionState:
     """Курсор стартует на текущей модели сессии; неизвестное имя — на дефолтную позицию."""
-    index = config.AVAILABLE_MODELS.index(current_model) if current_model in config.AVAILABLE_MODELS else 0
+    choices = config.model_choices()
+    index = choices.index(current_model) if current_model in choices else 0
     return ModelSelectionState(selected_index=index, current=current_model)
 
 
@@ -51,6 +53,6 @@ def apply_key(state: ModelSelectionState, key: str) -> ModelSelectionState:
     if key in (keyboard.UP, keyboard.DOWN):
         step = -1 if key == keyboard.UP else 1
         return replace(
-            state, selected_index=(state.selected_index + step) % len(config.AVAILABLE_MODELS)
+            state, selected_index=(state.selected_index + step) % len(state.available)
         )
     return state

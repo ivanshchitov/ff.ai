@@ -92,6 +92,18 @@ class HistoryManager:
         self.working = dict(working)
         self.save()
 
+    def clear_dialogues(self) -> None:
+        """Очищает диалог и память стратегии, но не рабочую память задачи.
+
+        `/clear` отвечает на «начать разговор заново»; цель и ограничения текущей задачи —
+        не разговор, поэтому остаются (как и долговременная память в своём хранилище).
+        """
+        self.summary = None
+        self.summary_covers = 0
+        self.facts = {}
+        self.dialogues = []
+        self.save()
+
     def clear(self) -> None:
         self.summary = None
         self.summary_covers = 0

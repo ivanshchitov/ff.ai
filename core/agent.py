@@ -24,9 +24,13 @@ from . import (
     mcp_tools,
     context_compressor,
     context_strategies,
+    invariants,
+    long_term_memory,
+    memory_layers,
     prompts,
     reranking,
     task_state,
+    user_profile,
 )
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
@@ -146,6 +150,8 @@ class RepoAgent:
         code_retriever: Optional[object] = None,
         tool_hub: Optional[object] = None,
         task_provider: Optional[Callable[[], object]] = None,
+        long_term: Optional[object] = None,
+        profiles: Optional[object] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -189,6 +195,11 @@ class RepoAgent:
         self._tool_steps: tuple = ()
         # Состояние задачи приходит функцией: агент не владеет конвейером и не читает его файл.
         self.task_provider = task_provider
+        # Долговременная память и профили — свои хранилища: очистка диалога их не касается.
+        self.long_term = long_term if long_term is not None else long_term_memory.LongTermMemory()
+        self.profiles = profiles if profiles is not None else user_profile.ProfileStore()
+        self._last_routing: tuple = ()
+        self._last_invariants: Optional[object] = None
         self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
@@ -244,6 +255,7 @@ class RepoAgent:
         не отменяет — он уходит с прежним блоком фактов.
         """
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
+        self._route_memory(question)
         self._retrieve_docs(question, on_phase)
         self._retrieve_code(question, on_phase)
         self._tool_steps = self._run_tool_flow(question, on_phase)
@@ -251,6 +263,7 @@ class RepoAgent:
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
         meta = self._ask_question(messages)
+        meta = self._enforce_invariants(messages, meta, on_phase)
         meta = self._enforce_citations(messages, meta, on_phase)
         self._remember(user_prompt, meta.content)
         self.history.add(question, meta.content, usage=self._usage_block(meta))
@@ -414,6 +427,12 @@ class RepoAgent:
         route = mcp_tools.route(views, choice.server, choice.tool)
         if route.error:
             return None
+        rules = tuple(getattr(self.domain, "invariants", ()) or ())
+        bad_arguments = invariants.check_arguments(arguments, rules) if rules else ()
+        if bad_arguments:
+            # Аргументы проверяются до запуска процесса: секрет не должен дойти ни до сервера,
+            # ни до журнала вызовов.
+            return None
         self._signal(on_phase, RequestPhase.MCP_TOOL)
         try:
             result = hub.call(route.server, choice.tool, arguments)
@@ -448,6 +467,152 @@ class RepoAgent:
         else:
             content = mcp_tools.tool_chain_message(step.as_tuple() for step in self._tool_steps)
         return {"role": "system", "content": content}
+
+    def _route_memory(self, question: str) -> None:
+        """Раскладывает реплику пользователя по слоям памяти правилами домена.
+
+        Роутинг идёт до сборки запроса: запись, сделанная текущим сообщением, должна быть видна
+        модели в этом же запросе. Модель память не заполняет: источник — только слова пользователя.
+        """
+        self._last_routing = ()
+        rules = getattr(self.domain, "memory", None)
+        if rules is None:
+            return
+        records = memory_layers.route(question, rules.rules)
+        if not records:
+            return
+        working = dict(self.history.working)
+        for record in records:
+            if record.layer == memory_layers.LONG_TERM:
+                self.long_term.remember(record.key, record.value, record.category)
+                continue
+            working[record.key] = record.value
+        if working != dict(self.history.working):
+            merged = memory_layers.merge_working(
+                self.history.working, memory_layers.records_from_block(working)
+            )
+            self.history.set_working(merged)
+        self._last_routing = tuple(records)
+
+    def set_goal(self, text: str) -> None:
+        """Ставит цель текущей задачи в рабочую память (`/memory goal`)."""
+        rules = getattr(self.domain, "memory", None)
+        key = getattr(rules, "goal_key", "") if rules is not None else ""
+        if not key:
+            return
+        merged = memory_layers.merge_working(
+            self.history.working,
+            (
+                memory_layers.MemoryRecord(
+                    layer=memory_layers.WORKING,
+                    category=getattr(rules, "goal_category", ""),
+                    key=key,
+                    value=memory_layers.clip_value(text),
+                ),
+            ),
+        )
+        self.history.set_working(merged)
+
+    def remember(self, text: str) -> object:
+        """Запоминает текст: правило домена задаёт слой и ключ, иначе это заметка с новым ключом."""
+        rules = getattr(self.domain, "memory", None)
+        found = memory_layers.route(text, getattr(rules, "rules", ()) or ())
+        if found:
+            record = found[0]
+            if record.layer == memory_layers.LONG_TERM:
+                self.long_term.remember(record.key, record.value, record.category)
+            else:
+                self.set_goal(record.value) if record.key == getattr(rules, "goal_key", "") else None
+                merged = memory_layers.merge_working(self.history.working, (record,))
+                self.history.set_working(merged)
+            return record
+        key = self._next_note_key()
+        return memory_layers.MemoryRecord(
+            layer=memory_layers.LONG_TERM,
+            category=memory_layers.CATEGORY_NOTE,
+            key=key,
+            value=memory_layers.clip_value(text),
+        )
+
+    def _next_note_key(self) -> str:
+        """Ключ для заметки без правила: последовательный номер в долговременной памяти."""
+        taken = {record.key for record in self.long_term.records()}
+        number = 1
+        while f"заметка-{number}" in taken:
+            number += 1
+        return f"заметка-{number}"
+
+    def forget(self, key: str) -> int:
+        """Удаляет записи: `all` — вся долговременная память, иначе ключ в обоих слоях."""
+        removed = 0
+        working = dict(self.history.working)
+        if key == "all":
+            removed += len(working)
+            self.history.set_working({})
+            removed += len(self.long_term.records())
+            self.long_term.clear()
+            return removed
+        if key in working:
+            working.pop(key)
+            self.history.set_working(working)
+            removed += 1
+        removed += self.long_term.forget(key)
+        return removed
+
+    def save_profile(self, domain_profile, answers) -> str:
+        """Собирает профиль из ответов опросника и делает его активным.
+
+        Имя и значения приходят от интерфейса: сам опросник — диалог с пользователем, а не логика
+        памяти. Пустое значение раздела не перезаписывает уже сохранённое.
+        """
+        name = ""
+        values: Dict[str, str] = {}
+        for field, value in answers:
+            value = (value or "").strip()
+            if not value:
+                continue
+            if field == user_profile.NAME_FIELD:
+                name = value
+                continue
+            values[field] = value
+        if not name:
+            name = self.profiles.next_name(domain_profile.name_prefix)
+        profile = user_profile.UserProfile(name=name)
+        for field, value in values.items():
+            profile = profile.with_value(field, value)
+        self.profiles.save(profile)
+        return name
+
+    def _memory_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение памяти: долговременные записи, рабочая память задачи и инструкция."""
+        rules = getattr(self.domain, "memory", None)
+        if rules is None:
+            return None
+        # Долговременная память идёт первой: свежая реплика и рабочая память важнее того, что
+        # агент знал раньше.
+        records = tuple(self.long_term.records()) + memory_layers.records_from_block(
+            self.history.working
+        )
+        content = memory_layers.memory_message(records)
+        return {"role": "system", "content": content} if content else None
+
+    def _profile_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение профиля: он отвечает на вопрос «как отвечать», поэтому идёт сразу после системы."""
+        domain_profile = getattr(self.domain, "profile", None)
+        if domain_profile is None:
+            return None
+        active = self.profiles.active()
+        if active is None:
+            return None
+        content = user_profile.profile_message(active, domain_profile.sections)
+        return {"role": "system", "content": content} if content else None
+
+    def _invariants_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение правил домена: они идут в каждый вопрос и стоят выше профиля и памяти."""
+        rules = tuple(getattr(self.domain, "invariants", ()) or ())
+        if not rules:
+            return None
+        return {"role": "system", "content": invariants.invariants_message(rules)}
 
     def _retrieve_code(self, question: str, on_phase=None) -> None:
         """Ищет фрагменты исходников перед вопросом; сбой поиска вопрос не отменяет.
@@ -507,6 +672,56 @@ class RepoAgent:
         )
         self._ledger.record(meta)
         return meta.content
+
+    @property
+    def last_routing(self) -> tuple:
+        """Записи памяти, сделанные текущей репликой: их печатает журнал."""
+        return self._last_routing
+
+    @property
+    def last_invariants(self):
+        return self._last_invariants
+
+    def memory_report(self) -> Dict[str, object]:
+        """Снимок слоёв памяти: обмены, рабочая память и долговременные записи с путями."""
+        rules = getattr(self.domain, "memory", None)
+        working = dict(self.history.working)
+        goal_key = getattr(rules, "goal_key", "") if rules is not None else ""
+        return {
+            "exchanges": self.exchanges,
+            "working": working,
+            # Цель отдаётся отдельным полем: интерфейсу не нужно знать её ключ из пакета домена.
+            "goal": working.get(goal_key, "") if goal_key else "",
+            "long_term": tuple(self.long_term.records()),
+            "long_term_path": str(getattr(self.long_term, "path", "")),
+            "rules": memory_layers.describe_rules(getattr(rules, "rules", ()) or ()),
+            "last_routing": tuple(self._last_routing),
+        }
+
+    def profile_report(self) -> Dict[str, object]:
+        """Снимок профилей: активный, его разделы и имена всех профилей."""
+        domain_profile = getattr(self.domain, "profile", None)
+        # Секции берутся из пакета домена, а не из скрипта опросника: опросник добавляет вопрос об
+        # имени, и в отчёте он был бы лишним разделом.
+        sections = getattr(domain_profile, "sections", ()) if domain_profile is not None else ()
+        active = self.profiles.active()
+        return {
+            "active": active.name if active is not None else "",
+            "sections": tuple(
+                (
+                    section.label,
+                    (active.value(section.id) if active is not None else "") or section.default,
+                )
+                for section in sections
+            ),
+            "names": self.profiles.names(),
+            "path": str(getattr(self.profiles, "path", "")),
+        }
+
+    def invariants_report(self) -> Dict[str, object]:
+        """Снимок правил домена и результата последней проверки ответа."""
+        rules = tuple(getattr(self.domain, "invariants", ()) or ())
+        return {"rules": rules, "check": self._last_invariants}
 
     def record_usage(self, meta: AnswerMeta) -> None:
         """Учитывает расход запроса, выполненного вне пути вопроса (шаги конвейера задачи)."""
@@ -601,6 +816,54 @@ class RepoAgent:
             finish_reason=meta.finish_reason,
         )
 
+    def _enforce_invariants(
+        self,
+        messages: List[Dict[str, str]],
+        meta: AnswerMeta,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> AnswerMeta:
+        """Проверка ответа правилами домена: повтор, затем замена текстом отказа.
+
+        Ответ-отказ не проверяется: он называет запрещённое, но ничего не предлагает. В историю
+        уходит то, что увидел пользователь, — отклонённый ответ не должен становиться примером
+        для следующего запроса.
+        """
+        rules = tuple(getattr(self.domain, "invariants", ()) or ())
+        if not rules or invariants.is_refusal(meta.content):
+            self._last_invariants = None
+            return meta
+        found = invariants.check_answer(meta.content, rules)
+        if not found:
+            self._last_invariants = None
+            return meta
+        for _ in range(config.INVARIANT_RETRIES):
+            self._signal(on_phase, RequestPhase.REQUEST)
+            retry = messages + [
+                {"role": "assistant", "content": meta.content},
+                {"role": "user", "content": invariants.retry_prompt(found)},
+            ]
+            meta = self._ask_question(retry)
+            if invariants.is_refusal(meta.content):
+                self._last_invariants = None
+                return meta
+            again = invariants.check_answer(meta.content, rules)
+            if not again:
+                self._last_invariants = None
+                return meta
+            found = again
+        text = invariants.refusal_text(found)
+        self._last_invariants = found
+        return AnswerMeta(
+            content=text,
+            model=meta.model,
+            elapsed_seconds=meta.elapsed_seconds,
+            prompt_tokens=meta.prompt_tokens,
+            completion_tokens=meta.completion_tokens,
+            total_tokens=meta.total_tokens,
+            cost_usd=meta.cost_usd,
+            finish_reason=meta.finish_reason,
+        )
+
     def reset(self) -> None:
         """Опустошает диалог и его память (команда /clear). Файлы других слоёв не трогает."""
         self._turns.clear()
@@ -616,9 +879,11 @@ class RepoAgent:
         self._last_result = None
         # Снимок проверки относится к последнему ответу — он сбрасывается вместе с диалогом.
         self._last_citations = None
+        self._last_routing = ()
+        self._last_invariants = None
         # Снимок поиска по документации не сбрасывается: это результат уже выполненной операции,
         # и /clear его не отменяет (то же правило, что у снимка сжатия).
-        self.history.clear()
+        self.history.clear_dialogues()
         self._ledger.reset()
 
     def restore_context(self) -> None:
@@ -687,10 +952,13 @@ class RepoAgent:
             {"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)}
         ]
         for message in (
+            self._profile_message(),
+            self._invariants_message(),
             self._docs_message(),
             self._code_message(),
             self._tool_message(),
             self._task_message(),
+            self._memory_message(),
         ):
             if message is not None:
                 messages.append(message)

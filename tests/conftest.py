@@ -51,6 +51,9 @@ def isolated_state(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("FFAI_TASKS_DIR", str(state / "tasks"))
     monkeypatch.setenv("FFAI_EXPORTS_DIR", str(state / "reports"))
     monkeypatch.delenv("FFAI_INDEX_FILE", raising=False)
+    # Автозапуск локальной модели выключен: llama-server установлен на машине, и юнит-прогон
+    # с автозапуском поднимал бы настоящую модель.
+    monkeypatch.setenv("FFAI_LLAMA_AUTOSTART", "0")
     # Обход реестра MCP в тестах всегда идёт на локальную заглушку: без этого любой прогон,
     # дотянувшийся до стартовой сводки, поднимал бы сервер документации портала.
     monkeypatch.setenv("FFAI_MCP_COMMAND", "python3")

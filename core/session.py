@@ -11,12 +11,14 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import (
+    aurora_ops,
     code_index,
     code_retrieval,
     config,
@@ -24,6 +26,8 @@ from . import (
     domains,
     mcp_registry,
     mcp_tools,
+    memory_layers,
+    user_profile,
     patches,
     reranking,
     task_pipeline,
@@ -118,6 +122,8 @@ class CommandResult:
     domain_changed: bool = False
     # Прогон задачи ведёт интерфейс: команда лишь сообщает, что его надо начать.
     task_run: bool = False
+    # Опросник профиля — диалог с пользователем, поэтому его ведёт интерфейс.
+    profile_setup: bool = False
 
 
 # Отличие «ретривер не передан» от «ретривера нет»: первое означает «собери по данным домена»,
@@ -192,6 +198,13 @@ class AssistantSession:
         )
         # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
         self._patch_confirmation: Optional[Callable[[str, str], bool]] = None
+        # Конвейер операций: исполнитель команд и подтверждение необратимых шагов приходят
+        # снаружи — так тесты проверяют решения, не запуская SDK.
+        self._ops_runner: Optional[Callable] = None
+        self._ops_confirmation: Optional[Callable[[str, str], bool]] = None
+        self._ops: Optional[aurora_ops.AuroraOps] = None
+        # Опросник профиля и подтверждения — то, что умеет только интерфейс.
+        self._profile_interview: Optional[Callable[[], None]] = None
 
     # --- доступ к состоянию ---------------------------------------------------------------
 
@@ -303,10 +316,14 @@ class AssistantSession:
         if self._agent.client is None:
             api_key = config.get_api_key()
             if not is_valid_api_key(api_key or ""):
-                raise APIError(
-                    "Нет пригодного ключа OPENCODE_API_KEY: облачная модель без него "
-                    "недоступна (локальной модели ключ не нужен)."
-                )
+                if not config.is_local_model(self._agent.model):
+                    raise APIError(
+                        "Нет пригодного ключа OPENCODE_API_KEY: облачная модель без него "
+                        "недоступна (локальной модели ключ не нужен)."
+                    )
+                # Локальному пресету ключ не нужен: клиент для него не проверяет ключ и не
+                # отправляет заголовок авторизации.
+                api_key = ""
             self._agent.client = APIClient(api_key)
         return self._agent.client
 
@@ -338,6 +355,14 @@ class AssistantSession:
                 return self._tool_command(argument)
             if command == "/task":
                 return self._task_command(argument)
+            if command == "/ops":
+                return self._ops_command(argument)
+            if command == "/memory":
+                return self._memory_command(argument)
+            if command == "/profile":
+                return self._profile_command(argument)
+            if command == "/invariants":
+                return CommandResult(command="/invariants", lines=self.invariants_lines())
             if command == "/commands":
                 return CommandResult(
                     command="/commands",
@@ -557,6 +582,265 @@ class AssistantSession:
             return CommandResult(command="/docs", lines=(f"Версия документации: {chosen}.",))
         return CommandResult(command="/docs", lines=self.docs_lines())
 
+    # --- память, профиль и правила домена -----------------------------------------------------
+
+    def set_profile_interview(self, runner) -> None:
+        """Опросник профиля ведёт интерфейс: он задаёт вопросы и читает ответы."""
+        self._profile_interview = runner
+
+    def profile_questions(self) -> Tuple[Tuple[str, str, str], ...]:
+        """Скрипт опросника: (машинное имя, вопрос, значение по умолчанию) — интерфейс печатает его."""
+        domain_profile = getattr(self.domain, "profile", None)
+        if domain_profile is None:
+            return ()
+        return tuple(
+            (question.field, question.prompt, question.default)
+            for question in user_profile.questions(domain_profile)
+        )
+
+    def save_profile(self, answers: Sequence[Tuple[str, str]]) -> str:
+        """Сохраняет профиль из ответов опросника и делает его активным.
+
+        Пустой ответ оставляет раздел как был (для нового профиля — как задал домен), поэтому
+        повторная настройка — это правка, а не потеря данных.
+        """
+        domain_profile = getattr(self.domain, "profile", None)
+        if domain_profile is None:
+            return ""
+        return self._agent.save_profile(domain_profile, answers)
+
+    def agent_routing(self) -> tuple:
+        """Записи памяти, сделанные последней репликой: журнальные строки интерфейса."""
+        with self._lock:
+            return self._agent.last_routing
+
+    def agent_invariants(self):
+        """Нарушения правил домена в последнем ответе (или None)."""
+        with self._lock:
+            return self._agent.last_invariants
+
+    def memory_report(self) -> Dict[str, object]:
+        with self._lock:
+            return self._agent.memory_report()
+
+    def profile_report(self) -> Dict[str, object]:
+        with self._lock:
+            return self._agent.profile_report()
+
+    def invariants_report(self) -> Dict[str, object]:
+        with self._lock:
+            return self._agent.invariants_report()
+
+    def memory_lines(self) -> Tuple[str, ...]:
+        """Отчёт о слоях памяти: обмены, рабочая память, долговременные записи и правила."""
+        report = self.memory_report()
+        lines = [f"Обменов в диалоге: {report['exchanges']}"]
+        working = report["working"]
+        lines.append("Рабочая память задачи:")
+        if working:
+            lines.extend(f"    {key}: {value}" for key, value in sorted(working.items()))
+        else:
+            lines.append("    пусто")
+        long_term = report["long_term"]
+        lines.append(f"Долговременная память ({report['long_term_path'] or 'нет пути'}):")
+        if long_term:
+            lines.extend(
+                f"    {record.key} [{record.category}]: {record.value}" for record in long_term
+            )
+        else:
+            lines.append("    пусто")
+        lines.append("Правила маршрутизации:")
+        lines.extend(f"    {rule}" for rule in report["rules"])
+        return tuple(lines)
+
+    def _memory_command(self, argument: str) -> CommandResult:
+        """`/memory` — отчёт, `goal|remember|forget` — операции со свободным текстом."""
+        tokens = argument.split(maxsplit=1)
+        action = tokens[0].lower() if tokens else ""
+        rest = tokens[1].strip() if len(tokens) > 1 else ""
+        if not action:
+            return CommandResult(command="/memory", lines=self.memory_lines())
+        if action == "goal":
+            if not rest:
+                return CommandResult(command="/memory", lines=("Нужна цель: /memory goal <текст>",))
+            self._agent.set_goal(rest)
+            return CommandResult(
+                command="/memory", lines=(f"Цель задачи: {rest}",) + self.memory_lines()
+            )
+        if action == "remember":
+            if not rest:
+                return CommandResult(command="/memory", lines=("Нужен текст: /memory remember <текст>",))
+            record = self._agent.remember(rest)
+            where = memory_layers.LAYER_LABELS.get(record.layer, record.layer)
+            return CommandResult(
+                command="/memory",
+                lines=(f"Запомнено ({where}, {record.key}): {record.value}",),
+            )
+        if action == "forget":
+            if not rest:
+                return CommandResult(
+                    command="/memory", lines=("Нужен ключ или all: /memory forget <ключ|all>",)
+                )
+            removed = self._agent.forget(rest)
+            return CommandResult(
+                command="/memory",
+                lines=(f"Удалено записей: {removed}.",) + self.memory_lines(),
+            )
+        return CommandResult(
+            command="/memory",
+            lines=("Форма: /memory, /memory goal <текст>, /memory remember <текст>, /memory forget <ключ|all>",),
+        )
+
+    def profile_lines(self) -> Tuple[str, ...]:
+        """Отчёт о профилях: активный, его разделы и имена сохранённых профилей."""
+        report = self.profile_report()
+        name = report["active"] or "нет"
+        lines = [f"Активный профиль: {name}", f"Хранилище: {report['path'] or 'нет пути'}"]
+        if report["sections"]:
+            lines.append("Разделы:")
+            lines.extend(f"    {label}: {value or '—'}" for label, value in report["sections"])
+        names = ", ".join(report["names"]) if report["names"] else "нет"
+        lines.append(f"Сохранённые профили: {names}")
+        return tuple(lines)
+
+    def _profile_command(self, argument: str) -> CommandResult:
+        """`/profile` — отчёт, `setup` — опросник, `use <имя>`, `forget <имя>`."""
+        tokens = argument.split(maxsplit=1)
+        action = tokens[0].lower() if tokens else ""
+        rest = tokens[1].strip() if len(tokens) > 1 else ""
+        if not action:
+            return CommandResult(command="/profile", lines=self.profile_lines())
+        if action == "setup":
+            if self._profile_interview is None:
+                return CommandResult(
+                    command="/profile",
+                    lines=("Опросник профиля ведёт интерфейс: в этом режиме он недоступен.",),
+                )
+            self._profile_interview()
+            return CommandResult(command="/profile", lines=("Профиль настроен.",) + self.profile_lines())
+        if action == "use":
+            if not rest:
+                return CommandResult(command="/profile", lines=("Нужно имя: /profile use <имя>",))
+            if not self._agent.profiles.use(rest):
+                return CommandResult(
+                    command="/profile",
+                    lines=(f"Профиля «{rest}» нет: выбор несуществующего профиля его не создаёт.",),
+                )
+            return CommandResult(
+                command="/profile", lines=(f"Активный профиль: {rest}.",) + self.profile_lines()
+            )
+        if action == "forget":
+            if not rest:
+                return CommandResult(command="/profile", lines=("Нужно имя: /profile forget <имя>",))
+            removed = self._agent.profiles.forget(rest)
+            return CommandResult(
+                command="/profile",
+                lines=(
+                    (f"Профиль «{rest}» удалён." if removed else f"Профиля «{rest}» нет."),
+                )
+                + self.profile_lines(),
+            )
+        return CommandResult(
+            command="/profile",
+            lines=("Форма: /profile, /profile setup, /profile use <имя>, /profile forget <имя>",),
+        )
+
+    def invariants_lines(self) -> Tuple[str, ...]:
+        """Отчёт о правилах домена: таблица правил и результат последней проверки."""
+        report = self.invariants_report()
+        rules = report["rules"]
+        lines = [f"Правил домена: {len(rules)}"]
+        for rule in rules:
+            forbid = ", ".join(rule.forbidden) if rule.forbidden else "проверяет промпт"
+            lines.append(f"    {rule.number}. {rule.rule} (запрещено: {forbid})")
+        check = report["check"]
+        if check:
+            lines.append("Последняя проверка: нарушения —")
+            lines.extend(f"    {item.number}. {item.rule} («{item.term}»)" for item in check)
+        else:
+            lines.append("Последняя проверка: нарушений не было.")
+        return tuple(lines)
+
+    # --- конвейер операций: SDK, цель, сборка, подпись, установка, запуск --------------------
+
+    def set_ops_runner(self, runner) -> None:
+        """Интерфейс передаёт исполнителя команд: в приложении это `subprocess`, в тестах — заглушка."""
+        self._ops_runner = runner
+        self._ops = None
+
+    def set_ops_confirmation(self, callback: Optional[Callable[[str, str], bool]]) -> None:
+        """Подтверждение необратимых шагов: подпись, установка и запуск без него не выполняются."""
+        self._ops_confirmation = callback
+        self._ops = None
+
+    def ops_pipeline(self) -> Optional[aurora_ops.AuroraOps]:
+        """Конвейер операций по правилам домена; домен без правил — конвейера нет."""
+        rules = getattr(self.domain, "ops", None)
+        if rules is None:
+            return None
+        if self._ops is None:
+            self._ops = aurora_ops.AuroraOps(
+                root=self.root,
+                ops=rules,
+                run=self._ops_runner,
+                confirm=self._ops_confirmation,
+                env=dict(os.environ),
+                docs_version=getattr(self.domain, "docs_version", ""),
+                app_id=self._app_id(),
+            )
+        return self._ops
+
+    def _app_id(self) -> str:
+        """Идентификатор приложения: имя файла по образцам домена, иначе имя каталога проекта."""
+        rules = getattr(self.domain, "ops", None)
+        patterns = getattr(rules, "app_id_globs", ()) if rules is not None else ()
+        for pattern in patterns:
+            found = sorted(self.root.glob(pattern))
+            if found:
+                return found[0].stem
+        return self.root.name
+
+    def _ops_command(self, argument: str) -> CommandResult:
+        """`/ops` — состояние, `target <архитектура>`, `build|sign|verify|install|run`, `refresh`."""
+        ops = self.ops_pipeline()
+        if ops is None:
+            return CommandResult(command="/ops", lines=("Домен не объявляет конвейер операций.",))
+        tokens = argument.split()
+        action = tokens[0].lower() if tokens else ""
+        if not action or action == "status":
+            return CommandResult(command="/ops", lines=ops.lines())
+        if action == "refresh":
+            status = ops.status(refresh=True)
+            return CommandResult(command="/ops", lines=("Список целей обновлён.",) + ops.lines(status))
+        if action == "target":
+            value = tokens[1] if len(tokens) > 1 else ""
+            report = ops.select_target(value)
+            lines = (report.line(),)
+            if not value and not report.reason:
+                lines = ("Выбрана цель по архитектуре домена.",)
+            return CommandResult(command="/ops", lines=lines + ops.lines())
+        steps = {
+            "build": ops.build,
+            "sign": ops.sign,
+            "verify": ops.verify,
+            "install": ops.install,
+            "run": ops.run_app,
+        }
+        if action not in steps:
+            return CommandResult(
+                command="/ops",
+                lines=(
+                    "Форма: /ops [status|refresh], /ops target <архитектура>, "
+                    "/ops build|sign|verify|install|run",
+                ),
+            )
+        report = steps[action]()
+        return CommandResult(command="/ops", lines=(report.line(),) + ops.lines())
+
+    def ops_report(self):
+        """Снимок конвейера: состояние и шаги — интерфейс печатает его, не читая внутренности."""
+        return self.ops_pipeline()
+
     # --- задача: прогон, подтверждение патчей, отчёты ---------------------------------------
 
     def set_patch_confirmation(self, callback: Optional[Callable[[str, str], bool]]) -> None:
@@ -585,6 +869,13 @@ class AssistantSession:
         Своего раннера команд приложение не заводит: два места с белым списком разошлись бы, и
         второе было бы дырой.
         """
+        pipeline = self.ops_pipeline()
+        if pipeline is not None and pipeline.state.target and self._ops_runner is not None:
+            # Сборка идёт конвейером операций: отдельный каталог сборки и настоящий SDK.
+            report = pipeline.build()
+            if report.status == aurora_ops.STATUS_UNAVAILABLE:
+                raise domain_checks.BuildUnavailable(report.reason)
+            return report.ok, report.output or report.reason
         checks = getattr(self.domain, "checks", None)
         tool_name = getattr(checks, "build_tool", "") if checks is not None else ""
         if not tool_name:

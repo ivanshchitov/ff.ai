@@ -127,6 +127,11 @@ LOCAL_MODELS = local_models()
 LOCAL_EMBEDDING_MODELS = local_embedding_models()
 
 
+def model_choices() -> List[str]:
+    """Облачные модели и локальные пресеты — один список для панели выбора и клиента."""
+    return list(AVAILABLE_MODELS) + [name for name in local_models() if name not in AVAILABLE_MODELS]
+
+
 def is_local_model(model: str) -> bool:
     return model in LOCAL_MODELS
 
@@ -257,6 +262,9 @@ TASK_PLAN_MAX_WORDS = int(os.getenv("FFAI_TASK_PLAN_MAX_WORDS", "400"))
 TASK_PATCH_MAX_WORDS = int(os.getenv("FFAI_TASK_PATCH_MAX_WORDS", "1500"))
 TASK_VALIDATE_MAX_WORDS = int(os.getenv("FFAI_TASK_VALIDATE_MAX_WORDS", "500"))
 TASK_GOAL_MAX_CHARS = int(os.getenv("FFAI_TASK_GOAL_MAX_CHARS", "400"))
+# Правила домена: один повтор, затем ответ заменяется текстом отказа. Так же, как у цитат:
+# повтор стоит запроса, и бесконечно повторять нарушающий ответ незачем.
+INVARIANT_RETRIES = int(os.getenv("FFAI_INVARIANT_RETRIES", "1"))
 TASK_RESULT_SLUG_MAX_CHARS = int(os.getenv("FFAI_TASK_RESULT_SLUG_MAX_CHARS", "40"))
 # Первая версия плана ограничена, дальше предел живёт на задаче и растёт вместе с названной работой.
 MAX_PLAN_ITEMS = int(os.getenv("FFAI_MAX_PLAN_ITEMS", "10"))

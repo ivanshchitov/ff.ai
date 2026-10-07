@@ -29,6 +29,15 @@ TOOLS = (
     "repo_git",
     "repo_run",
     "repo_save",
+    # Задания здоровья репозитория и планировщик объявлены тем же сервером — порядок объявления
+    # и есть порядок этого списка.
+    "target_build",
+    "index_refresh",
+    "public_api_scan",
+    "schedule_add",
+    "schedule_list",
+    "schedule_run_due",
+    "schedule_summary",
 )
 
 
@@ -125,6 +134,23 @@ def test_command_outside_the_whitelist_is_an_error_result(
     assert result.is_error is True
     assert "не входит в белый список" in result.content[0].text
     assert "echo" in result.content[0].text
+
+
+def test_job_tool_refusal_is_marked_through_the_protocol(
+    repo: Path, tools_file: Path, exports_dir: Path
+):
+    """Задание идёт тем же путём, что ручной вызов: отказ белого списка — ошибочный результат.
+
+    Планировщик выполняет задание внутри процесса, поэтому признак ошибки для задания — то же,
+    чем он отличает отказ от данных в журнале прогонов.
+    """
+    async def scenario():
+        async with Client(_parameters(repo, tools_file, exports_dir)) as client:
+            return await client.call_tool("target_build", {"steps": "rm -rf /"})
+
+    result = asyncio.run(scenario())
+    assert result.is_error is True
+    assert "белый список" in result.content[0].text
 
 
 def test_broken_whitelist_file_is_an_error_not_a_crash(

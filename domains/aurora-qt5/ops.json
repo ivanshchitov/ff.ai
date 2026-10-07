@@ -1,0 +1,95 @@
+{
+  "tool": {
+    "env": "FFAI_SFDK",
+    "default": "~/AuroraOS/bin/sfdk"
+  },
+  "target_pattern": "AuroraOS-*-{arch}.default",
+  "architectures": {
+    "armv7hl": "32-битная ARM",
+    "aarch64": "64-битная ARM",
+    "x86_64": "эмулятор x86_64"
+  },
+  "default_architecture": "armv7hl",
+  "state_dir": ".aurora",
+  "steps": {
+    "target": [
+      "config",
+      "target={target}"
+    ],
+    "build_init": [
+      "build-init",
+      "{project}"
+    ],
+    "build": [
+      "build"
+    ],
+    "sign": [
+      "engine",
+      "exec",
+      "rpmsign-external",
+      "sign",
+      "--key",
+      "{key}",
+      "{package}"
+    ],
+    "verify": [
+      "engine",
+      "exec",
+      "rpm",
+      "-qp",
+      "--qf",
+      "%{SIGPGP:pgpsig}",
+      "{package}"
+    ],
+    "deploy": [
+      "deploy",
+      "--pkcon"
+    ],
+    "run": [
+      "device",
+      "exec",
+      "sailjail",
+      "-a",
+      "{app_id}"
+    ]
+  },
+  "package_globs": [
+    "RPMS/*.rpm",
+    "*.rpm",
+    "**/*.rpm"
+  ],
+  "signature": {
+    "key_env": "FFAI_SIGN_KEY",
+    "signed_markers": [
+      "SIGPGP: rsa",
+      "SIGPGP: RS",
+      "Signature:",
+      "подпись:"
+    ],
+    "unsigned_markers": [
+      "(none)",
+      "NOT OK",
+      "UNSIGNED",
+      "без подписи",
+      "not signed"
+    ]
+  },
+  "forbidden_commands": [
+    "maintain",
+    "tools install",
+    "tools remove",
+    "misc"
+  ],
+  "package_check_command": [
+    "engine",
+    "exec",
+    "rpm",
+    "-q",
+    "--queryformat=%{NAME}",
+    "{app_id}"
+  ],
+  "app_id_globs": [
+    "rpm/*.spec",
+    "*.spec"
+  ]
+}
