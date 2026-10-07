@@ -26,11 +26,12 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.console import Group
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from core import config
+from core import config, task_state
 from core.agent import CompressionReport, FactsReport, RequestPhase
 from core.answer_settings import AnswerFormat, ContextStrategy
 from core.api_client import APIError, AnswerMeta, is_valid_api_key, is_valid_json_answer
@@ -49,6 +50,9 @@ PHASE_LABELS = {
     RequestPhase.CODE_QUERY: "Поисковый запрос по исходникам...",
     RequestPhase.CODE_RERANK: "Отбор фрагментов кода...",
     RequestPhase.TOOL_CHOICE: "Выбор инструментов...",
+    RequestPhase.TASK_PLAN: "Планирование задачи...",
+    RequestPhase.TASK_EXECUTE: "Выполнение подзадачи...",
+    RequestPhase.TASK_VALIDATE: "Проверка артефакта...",
 }
 FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
@@ -94,6 +98,9 @@ class DevAssistantTUI:
         self._journal: List[str] = []
         self._printed_compression: Optional[CompressionReport] = None
         self._printed_facts: Optional[FactsReport] = None
+        self._run_phase: str = ""
+        # Подтверждение записи в репозиторий даёт только интерфейс: без него патчи не применяются.
+        self.session.set_patch_confirmation(self._confirm_patch)
         self._register_autocomplete()
 
     # --- основной цикл -------------------------------------------------------------------
@@ -146,6 +153,8 @@ class DevAssistantTUI:
             self.console.print(
                 f"[dim]Активный домен: {escape(self.session.domain.title)}[/dim]"
             )
+        if result.task_run:
+            self._run_task()
 
     def _ask(self, question: str) -> None:
         if not self._ensure_api_key():
@@ -384,6 +393,164 @@ class DevAssistantTUI:
             f"Стоимость: {cost}  |  Средняя скорость: {speed}[/dim]"
         )
 
+    # --- прогон задачи ---------------------------------------------------------------------
+
+    def _run_task(self) -> None:
+        """Прогон задачи: операции по одной под панелью, пауза на границе операции.
+
+        Пауза (клавиша p или Ctrl+C) останавливает прогон между операциями: текущий запрос
+        завершается, состояние задачи уже записано, и продолжение возможно и здесь, и после
+        перезапуска приложения.
+        """
+        paused = False
+        try:
+            self.session.task_set_paused(False)
+            with keyboard.raw_mode():
+                with Live(
+                    self._task_frame(""),
+                    console=self.console,
+                    refresh_per_second=8,
+                    transient=True,
+                ) as live:
+                    while True:
+                        live.update(self._task_frame(""))
+                        key = self._drain_pause_key()
+                        if key == "pause":
+                            paused = True
+                            break
+                        report = self.session.task_step()
+                        if report is None:
+                            break
+                        for text in report.notes:
+                            self.console.print(escape(text))
+                        live.update(self._task_frame(report.label))
+                        if report.awaiting_edits:
+                            answer = self._ask_plan_edits(live)
+                            self.session.task_answer_edits(answer)
+                            continue
+                        if report.finished:
+                            self._print_task_result()
+                            break
+        except KeyboardInterrupt:
+            # Прерывание во время прогона — это пауза, а не выход: задача не должна теряться.
+            paused = True
+        finally:
+            if paused:
+                self.session.task_set_paused(True)
+                self.console.print(
+                    "[bold yellow]Прогон остановлен на паузе: состояние сохранено, "
+                    "продолжить — /task run[/bold yellow]"
+                )
+            self._print_status_bar()
+
+    def _drain_pause_key(self) -> str:
+        """Читает клавиши, накопленные с прошлой операции: пауза по p или Ctrl+C."""
+        while True:
+            try:
+                key = keyboard.read_key_nowait()
+            except KeyboardInterrupt:
+                return "pause"
+            if not key:
+                return ""
+            if key in ("p", "P", "з", "З") or key == keyboard.ESC:
+                return "pause"
+
+    def _task_frame(self, label: str) -> Group:
+        """Панель прогона: этапы, шаг, ожидаемое действие, план с отметками и подсказка о паузе."""
+        state = self.session.task_state
+        task = state.current
+        if task is None:
+            return Group(Panel("Очередь задач пуста.", title="Задача"))
+        stages = " → ".join(
+            f"[bold]{title}[/bold]" if stage is task.stage else title
+            for stage, title in (
+                (task_state.Stage.PLANNING, "Планирование"),
+                (task_state.Stage.EXECUTION, "Выполнение"),
+                (task_state.Stage.VALIDATION, "Проверка"),
+                (task_state.Stage.DONE, "Завершено"),
+            )
+        )
+        lines = [stages, ""]
+        lines.append(f"Шаг: {escape(task.current_step)}")
+        lines.append(f"Ожидается: {escape(task.expected_action)}")
+        if label:
+            lines.append(f"Сейчас: {escape(label)}")
+        if task.plan:
+            lines.append("")
+            for index, item in enumerate(task.plan, start=1):
+                patch = task.patch_for(index)
+                mark = "[x]" if patch is not None and patch.applied else "[ ]"
+                lines.append(f"{escape(mark)} {index}. {escape(item)}")
+        if task.issues:
+            lines.append("")
+            lines.extend(f"⛔ {escape(issue.line())}" for issue in task.issues)
+        lines.append("")
+        lines.append("Пауза — клавиша p или Ctrl+C; Enter — выполнить введённое")
+        title = f"Задача {task.number} из {len(state.tasks)}"
+        return Group(
+            Panel("\n".join(lines), title=title, border_style="cyan"),
+            self._status_line(),
+        )
+
+    def _status_line(self) -> Text:
+        usage = self.session.session_usage
+        cost = f"${usage.cost_usd:.6f}" if usage.cost_usd is not None else "неизвестно"
+        return Text.from_markup(
+            f"[dim]Модель: {escape(self.session.model)}  |  Домен: "
+            f"{escape(self.session.domain.id)}  |  "
+            f"Сессия: {usage.total_tokens} ток., {cost}[/dim]"
+        )
+
+    def _ask_plan_edits(self, live: Live) -> str:
+        """Вопрос о правках плана набирается посимвольно: панель показывает набираемое.
+
+        `readline` внутри прогона не годится: терминал уже в cbreak, эха нет, и набранный текст
+        был бы невидим; останавливать панель ради вопроса — противоречит «панель показывает
+        состояние всегда».
+        """
+        typed: List[str] = []
+        self.console.print("[bold]План построен. Правки (пустая строка — выполнять):[/bold]")
+        while True:
+            live.update(self._task_frame("Правки к плану: " + "".join(typed)))
+            try:
+                key = keyboard.read_char()
+            except KeyboardInterrupt:
+                return ""
+            if key == keyboard.ENTER:
+                return "".join(typed)
+            if key == keyboard.BACKSPACE:
+                if typed:
+                    typed.pop()
+                continue
+            if key and key not in (keyboard.ESC, keyboard.UP, keyboard.DOWN):
+                typed.append(key)
+
+    def _confirm_patch(self, summary: str, patch_text: str) -> bool:
+        """Подтверждение записи в репозиторий: показывает патч и читает один ответ."""
+        self.console.print(f"[bold]Патч к применению: {escape(summary)}[/bold]")
+        preview = patch_text.strip().splitlines()[:20]
+        for line in preview:
+            self.console.print(f"[dim]{escape(line)}[/dim]")
+        if len(patch_text.strip().splitlines()) > len(preview):
+            self.console.print("[dim]… патч показан не целиком[/dim]")
+        self.console.print("Применить патч? y — да, n — нет")
+        try:
+            key = keyboard.read_char().strip().casefold()
+        except KeyboardInterrupt:
+            return False
+        return key in ("y", "н", "д")
+
+    def _print_task_result(self) -> None:
+        state = self.session.task_state
+        task = state.current
+        if task is None:
+            return
+        self.console.print(
+            f"[bold green]Задача {task.number}: {escape(task.title)}[/bold green]"
+        )
+        if task.result_path:
+            self.console.print(f"[dim]Отчёт: {escape(task.result_path)}[/dim]")
+
     def _print_status_bar(self) -> None:
         usage = self.session.session_usage
         cost = f"${usage.cost_usd:.6f}" if usage.cost_usd is not None else "неизвестно"
@@ -394,10 +561,20 @@ class DevAssistantTUI:
             f"Формат: {FORMAT_LABELS[settings.format]}  |  "
             f"Стратегия: {STRATEGY_LABELS[settings.context_strategy]}  |  "
             f"Объём: {settings.max_words} слов  |  "
-            f"Команды: {' '.join(STATUS_COMMANDS)}  |  "
+            + self._task_status_fragment()
+            + f"Команды: {' '.join(STATUS_COMMANDS)}  |  "
             f"Сессия: {usage.total_tokens} ток., {cost}[/dim]"
         )
         self.console.print(Rule(style="dim"))
+
+    def _task_status_fragment(self) -> str:
+        """Строка задачи в статус-баре: только пока задача незавершена — иначе layout не меняется."""
+        state = self.session.task_state
+        task = state.current
+        if task is None or not state.unfinished():
+            return ""
+        stage = task_state.STAGE_TITLES[task.stage]
+        return f"Задача: {escape(str(task.number))} ({escape(stage)})  |  "
 
     def _exit(self) -> None:
         self.console.print(f"[bold yellow]{GOODBYE_MESSAGE}[/bold yellow]")

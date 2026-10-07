@@ -249,6 +249,20 @@ TOOL_FLOW_MAX_STEPS = int(os.getenv("FFAI_TOOL_FLOW_MAX_STEPS", "10"))
 TOOL_FLOW_CONTEXT_CHARS = int(os.getenv("FFAI_TOOL_FLOW_CONTEXT_CHARS", "24000"))
 TOOL_FLOW_OLD_RESULT_CHARS = int(os.getenv("FFAI_TOOL_FLOW_OLD_RESULT_CHARS", "1500"))
 TOOL_ANSWER_RESULT_CHARS = int(os.getenv("FFAI_TOOL_ANSWER_RESULT_CHARS", "6000"))
+
+# --- Задача с проверкой (P6) ---
+# Потолки этапов: у каждой операции свой предел длины, и он же задан в тексте запроса — модель
+# получает то, что от неё ждут, а не «напиши раздел».
+TASK_PLAN_MAX_WORDS = int(os.getenv("FFAI_TASK_PLAN_MAX_WORDS", "400"))
+TASK_PATCH_MAX_WORDS = int(os.getenv("FFAI_TASK_PATCH_MAX_WORDS", "1500"))
+TASK_VALIDATE_MAX_WORDS = int(os.getenv("FFAI_TASK_VALIDATE_MAX_WORDS", "500"))
+TASK_GOAL_MAX_CHARS = int(os.getenv("FFAI_TASK_GOAL_MAX_CHARS", "400"))
+TASK_RESULT_SLUG_MAX_CHARS = int(os.getenv("FFAI_TASK_RESULT_SLUG_MAX_CHARS", "40"))
+# Первая версия плана ограничена, дальше предел живёт на задаче и растёт вместе с названной работой.
+MAX_PLAN_ITEMS = int(os.getenv("FFAI_MAX_PLAN_ITEMS", "10"))
+MAX_PLAN_ROUNDS = int(os.getenv("FFAI_MAX_PLAN_ROUNDS", "5"))
+MAX_VALIDATION_ATTEMPTS = int(os.getenv("FFAI_MAX_VALIDATION_ATTEMPTS", "3"))
+MAX_TRANSITION_LOG = int(os.getenv("FFAI_MAX_TRANSITION_LOG", "20"))
 DOCS_CITATION_RETRIES = int(os.getenv("FFAI_DOCS_CITATION_RETRIES", "1"))
 
 MAX_INPUT_LENGTH = 2000

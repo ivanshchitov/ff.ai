@@ -1,0 +1,21 @@
+{
+  "forbidden": [
+    {"pattern": "QtWidgets", "reason": "интерфейс целевой платформы строится на Silica и QML: QtWidgets в ней недоступен"},
+    {"pattern": "QT \\+= widgets", "reason": "модуль widgets не входит в целевую платформу"},
+    {"pattern": "Qt5::Widgets", "reason": "модуль widgets не входит в целевую платформу"},
+    {"pattern": "import QtQuick 2\\.(1[2-9]|[3-9][0-9])", "reason": "целевая версия Qt — 5.6, старшие версии QtQuick в ней не поддерживаются"},
+    {"pattern": "import QtQuick\\.Controls 2", "reason": "в целевой платформе интерфейс строится на Silica, а не на QtQuick.Controls 2"},
+    {"pattern": "QT_VERSION_CHECK\\(6", "reason": "целевая платформа — Qt 5.6, а не Qt 6"},
+    {"pattern": "QML_ELEMENT|qt_add_qml_module", "reason": "это идиомы Qt 6, в целевой платформе их нет"}
+  ],
+  "spec_required": [
+    "Name", "Version", "Release", "Summary", "License", "Group", "URL", "Source",
+    "BuildRequires", "BuildArch", "%files"
+  ],
+  "spec_globs": ["*.spec", "rpm/*.spec", "**/*.spec"],
+  "build": {
+    "tool": "repo_run",
+    "steps": ["qmake", "make"],
+    "description": "сборка цели штатными командами целевого окружения"
+  }
+}

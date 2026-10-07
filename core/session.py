@@ -16,7 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import code_index, code_retrieval, config, domains, mcp_registry, mcp_tools, reranking
+from . import (
+    code_index,
+    code_retrieval,
+    config,
+    domain_checks,
+    domains,
+    mcp_registry,
+    mcp_tools,
+    patches,
+    reranking,
+    task_pipeline,
+    task_state,
+)
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
 from .api_client import APIClient, APIError, AnswerMeta, is_valid_api_key
@@ -104,6 +116,8 @@ class CommandResult:
     exit_requested: bool = False
     unknown: bool = False
     domain_changed: bool = False
+    # Прогон задачи ведёт интерфейс: команда лишь сообщает, что его надо начать.
+    task_run: bool = False
 
 
 # Отличие «ретривер не передан» от «ретривера нет»: первое означает «собери по данным домена»,
@@ -165,7 +179,19 @@ class AssistantSession:
             docs_retriever=self._docs_retriever,
             code_retriever=self._code_retriever,
             tool_hub=self._tool_hub(),
+            task_provider=lambda: self._pipeline.state,
         )
+        self._task_store = task_state.TaskStore()
+        self._pipeline = task_pipeline.TaskPipeline(
+            domain=self._selection.domain,
+            root=self.root,
+            store=self._task_store,
+            ask=self._task_ask,
+            prepare=self._task_prepare,
+            build=self._task_build,
+        )
+        # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
+        self._patch_confirmation: Optional[Callable[[str, str], bool]] = None
 
     # --- доступ к состоянию ---------------------------------------------------------------
 
@@ -310,6 +336,8 @@ class AssistantSession:
                 return self._mcp_command(argument)
             if command == "/tool":
                 return self._tool_command(argument)
+            if command == "/task":
+                return self._task_command(argument)
             if command == "/commands":
                 return CommandResult(
                     command="/commands",
@@ -528,6 +556,225 @@ class AssistantSession:
             chosen = value or "актуальная по данным сервера"
             return CommandResult(command="/docs", lines=(f"Версия документации: {chosen}.",))
         return CommandResult(command="/docs", lines=self.docs_lines())
+
+    # --- задача: прогон, подтверждение патчей, отчёты ---------------------------------------
+
+    def set_patch_confirmation(self, callback: Optional[Callable[[str, str], bool]]) -> None:
+        """Интерфейс передаёт сюда свой способ спросить пользователя о записи в репозиторий."""
+        self._patch_confirmation = callback
+
+    def _task_ask(self, messages, max_words: int, phase: str) -> AnswerMeta:
+        """Один запрос этапа задачи: та же модель сессии, свой предел длины, общий учёт расхода."""
+        client = self._require_client()
+        try:
+            self._emit(PhaseChanged(RequestPhase(phase)))
+        except ValueError:
+            pass
+        meta = client.ask_with_usage_messages(
+            messages,
+            max_tokens=config.max_tokens_for_words(max_words),
+            temperature=None,
+            model=self._agent.model,
+        )
+        self._agent.record_usage(meta)
+        return meta
+
+    def _task_build(self, command: str) -> Tuple[bool, str]:
+        """Команда сборки выполняется инструментом сервера репозитория: белый список — там.
+
+        Своего раннера команд приложение не заводит: два места с белым списком разошлись бы, и
+        второе было бы дырой.
+        """
+        checks = getattr(self.domain, "checks", None)
+        tool_name = getattr(checks, "build_tool", "") if checks is not None else ""
+        if not tool_name:
+            raise domain_checks.BuildUnavailable("домен не объявил инструмент сборки")
+        hub = self._tool_hub()
+        if hub is None:
+            raise domain_checks.BuildUnavailable("серверы инструментов не подключены")
+        try:
+            route = mcp_tools.route(hub.views(), "", tool_name)
+            if route.error:
+                raise domain_checks.BuildUnavailable(route.error)
+            result = hub.call(route.server, tool_name, {"command": command})
+            return (not result.is_error), result.text
+        except domain_checks.BuildUnavailable:
+            raise
+        except Exception as error:  # noqa: BLE001 - причину показываем текстом
+            raise domain_checks.BuildUnavailable(str(error)) from error
+        finally:
+            hub.close()
+
+    def _task_prepare(self, index: int, patch_text: str) -> task_state.TaskPatch:
+        """Готовит патч к записи: проверки домена, подтверждение пользователя, применение.
+
+        Порядок именно такой: непроверенный патч не показывается как «можно применять», а
+        непринятый не трогает файлы вовсе.
+        """
+        checks = getattr(self.domain, "checks", None)
+        summary = ""
+        try:
+            summary = patches.parse(patch_text).summary()
+        except patches.PatchError as error:
+            return task_state.TaskPatch(
+                index=index, text=patch_text, summary="", applied=False, reason=str(error)
+            )
+        if checks is not None:
+            # На этапе выполнения проверяются правила содержимого и применение: сборку запускает
+            # этап проверки, а не каждый патч.
+            result = domain_checks.check_patch(
+                patch_text, self.root, domain_checks.without_build(checks)
+            )
+            if not result.ok:
+                return task_state.TaskPatch(
+                    index=index,
+                    text=patch_text,
+                    summary=summary,
+                    applied=False,
+                    reason="; ".join(issue.line() for issue in result.issues),
+                )
+        if self._patch_confirmation is None:
+            return task_state.TaskPatch(
+                index=index,
+                text=patch_text,
+                summary=summary,
+                applied=False,
+                reason="применение не подтверждено",
+            )
+        if not self._patch_confirmation(summary, patch_text):
+            return task_state.TaskPatch(
+                index=index,
+                text=patch_text,
+                summary=summary,
+                applied=False,
+                reason="пользователь отказался применять патч",
+            )
+        reason = patches.apply(self.root, patch_text)
+        return task_state.TaskPatch(
+            index=index,
+            text=patch_text,
+            summary=summary,
+            applied=not reason,
+            reason=reason,
+        )
+
+    def _task_command(self, argument: str) -> CommandResult:
+        """`/task` — отчёт, `/task add <цель>`, `/task run`, `/task stage <этап>`, `/task stop`."""
+        tokens = argument.split(maxsplit=1)
+        action = tokens[0].lower() if tokens else ""
+        rest = tokens[1].strip() if len(tokens) > 1 else ""
+        if not action:
+            return CommandResult(command="/task", lines=self.task_lines())
+        if action == "add":
+            if not rest:
+                return CommandResult(
+                    command="/task", lines=("Нужна цель: /task add <что сделать>",)
+                )
+            self._pipeline.add(rest)
+            return CommandResult(
+                command="/task", lines=("Задача добавлена.",) + self.task_lines()
+            )
+        if action == "run":
+            if not self._pipeline.unfinished():
+                return CommandResult(
+                    command="/task",
+                    lines=("Очередь пуста — выполнять нечего. Добавьте задачу: /task add <цель>",),
+                )
+            return CommandResult(
+                command="/task", lines=("Запускаю прогон задачи.",), task_run=True
+            )
+        if action == "stage":
+            if not rest:
+                return CommandResult(
+                    command="/task",
+                    lines=("Нужен этап: /task stage planning|execution|validation|done",),
+                )
+            result = self._pipeline.request_stage(rest)
+            if result.accepted:
+                return CommandResult(
+                    command="/task",
+                    lines=(f"Этап: {task_state.STAGE_TITLES[result.stage]}.",) + self.task_lines(),
+                )
+            allowed = ", ".join(
+                task_state.STAGE_TITLES[stage] for stage in result.allowed
+            )
+            return CommandResult(
+                command="/task",
+                lines=(
+                    f"Переход не выполнен: {result.reason}.",
+                    f"Допустимые переходы: {allowed or 'нет'}.",
+                ),
+            )
+        if action == "stop":
+            self._pipeline.stop()
+            return CommandResult(command="/task", lines=("Очередь задач остановлена.",))
+        return CommandResult(
+            command="/task",
+            lines=(
+                "Форма: /task, /task add <цель>, /task run, /task stage <этап>, /task stop",
+            ),
+        )
+
+    def task_lines(self) -> Tuple[str, ...]:
+        """Отчёт о задаче и очереди: этап, шаг, ожидаемое действие, план с отметками, замечания."""
+        state = self._pipeline.state
+        if not state.tasks:
+            return (
+                "Задач нет. Добавить: /task add <цель>; выполнить: /task run.",
+                f"Состояние: {self._task_store.path}",
+            )
+        lines: List[str] = [
+            f"Очередь: задач {len(state.tasks)}, незавершённых {len(state.unfinished())}; "
+            + ("прогон на паузе" if state.paused else "прогон не на паузе")
+        ]
+        task = state.current
+        if task is not None:
+            lines.append(
+                f"Задача {task.number} ({task.status}): {task.goal}"
+            )
+            lines.append(f"Этап: {task.title}; шаг: {task.current_step}")
+            lines.append(f"Ожидается: {task.expected_action}")
+            for index, item in enumerate(task.plan, start=1):
+                patch = task.patch_for(index)
+                mark = "x" if patch is not None and patch.applied else " "
+                note = ""
+                if patch is not None and not patch.applied:
+                    note = f" — {patch.reason or 'не применён'}"
+                lines.append(f"    [{mark}] {index}. {item}{note}")
+            if task.issues:
+                lines.append("Замечания:")
+                lines.extend(f"    {issue.line()}" for issue in task.issues)
+            if task.transitions:
+                lines.append("Журнал переходов:")
+                lines.extend(f"    {entry.line()}" for entry in task.transitions[-5:])
+            if task.result_path:
+                lines.append(f"Отчёт: {task.result_path}")
+            if task.fail_reason:
+                lines.append(f"Причина неудачи: {task.fail_reason}")
+        if state.paused:
+            lines.append("Продолжить: /task run.")
+        return tuple(lines)
+
+    def task_step(self):
+        """Одна операция прогона: интерфейс вызывает её и рисует панель."""
+        with self._lock:
+            return self._pipeline.step()
+
+    def task_answer_edits(self, text: str) -> None:
+        with self._lock:
+            self._pipeline.answer_edits(text)
+
+    def task_set_paused(self, paused: bool) -> None:
+        with self._lock:
+            self._pipeline.set_paused(paused)
+
+    @property
+    def task_paused(self) -> bool:
+        return self._pipeline.state.paused
+
+    @property
+    def task_state(self):
+        return self._pipeline.state
 
     # --- MCP: серверы, отчёт, вызов инструмента -------------------------------------------
 

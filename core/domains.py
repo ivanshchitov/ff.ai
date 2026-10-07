@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -85,6 +86,33 @@ class DocsTools:
     versions: str
     search: str
     document: str
+
+
+@dataclass(frozen=True)
+class ForbiddenRule:
+    """Запрещённая конструкция домена: образец для поиска и причина, почему её нельзя."""
+
+    pattern: str
+    reason: str
+
+    def matches(self, line: str) -> bool:
+        return re.search(self.pattern, line) is not None
+
+
+@dataclass(frozen=True)
+class DomainChecks:
+    """Правила детерминированной проверки артефакта задачи.
+
+    Запрещённые конструкции, обязательные элементы описания пакета и команды сборки принадлежат
+    предметной области: ядро не знает ни одного запрещённого слова.
+    """
+
+    forbidden: Tuple[ForbiddenRule, ...]
+    spec_required: Tuple[str, ...]
+    spec_globs: Tuple[str, ...]
+    build_tool: str = ""
+    build_steps: Tuple[str, ...] = ()
+    build_description: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +200,8 @@ class Domain:
     docs: Optional[DomainDocs] = None
     # Корпус кода домена: расширения исходников, исключения и правила разбиения на фрагменты.
     corpus: Optional[DomainCorpus] = None
+    # Правила детерминированной проверки артефакта задачи (P6).
+    checks: Optional[DomainChecks] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -369,6 +399,56 @@ def _load_corpus(path: Path) -> Optional[DomainCorpus]:
     return corpus
 
 
+def _load_checks(path: Path) -> Optional[DomainChecks]:
+    """Необязательный раздел пакета: правила проверки артефакта задачи.
+
+    Отсутствие файла означает, что домен не объявляет проверок — тогда задача проверится только
+    модельным ревью. Сломанный файл обязан остановить загрузку: молча пропущенная проверка
+    выглядит как пройденная.
+    """
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+    raw_forbidden = data.get("forbidden", [])
+    if not isinstance(raw_forbidden, list):
+        raise DomainSchemaError(f"{path}: поле «forbidden» должно быть списком")
+    forbidden = []
+    for item in raw_forbidden:
+        if not isinstance(item, dict):
+            raise DomainSchemaError(f"{path}: правило «forbidden» должно быть объектом")
+        pattern = str(item.get("pattern", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if not pattern or not reason:
+            raise DomainSchemaError(f"{path}: у правила нужны и «pattern», и «reason»")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise DomainSchemaError(f"{path}: образец {pattern!r} не компилируется ({error})") from error
+        forbidden.append(ForbiddenRule(pattern=pattern, reason=reason))
+
+    def _strings(key: str) -> Tuple[str, ...]:
+        raw = data.get(key, [])
+        if not isinstance(raw, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw
+        ):
+            raise DomainSchemaError(f"{path}: поле «{key}» должно быть списком непустых строк")
+        return tuple(item.strip() for item in raw)
+
+    raw_build = data.get("build", {})
+    if not isinstance(raw_build, dict):
+        raise DomainSchemaError(f"{path}: поле «build» должно быть объектом")
+    return DomainChecks(
+        forbidden=tuple(forbidden),
+        spec_required=_strings("spec_required"),
+        spec_globs=_strings("spec_globs"),
+        build_tool=str(raw_build.get("tool", "")).strip(),
+        build_steps=tuple(
+            str(step).strip() for step in raw_build.get("steps", []) if str(step).strip()
+        ),
+        build_description=str(raw_build.get("description", "")).strip(),
+    )
+
+
 def available_domains(domains_dir: Optional[Path] = None) -> Tuple[str, ...]:
     """Идентификаторы установленных пакетов — по каталогам с `domain.json`."""
     root = Path(domains_dir or config.DOMAINS_DIR)
@@ -411,6 +491,7 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         tools_path=(path / "tools.json") if (path / "tools.json").is_file() else None,
         docs=_load_docs(path / "docs.json"),
         corpus=_load_corpus(path / "corpus.json"),
+        checks=_load_checks(path / "validation.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

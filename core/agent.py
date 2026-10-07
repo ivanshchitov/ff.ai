@@ -26,6 +26,7 @@ from . import (
     context_strategies,
     prompts,
     reranking,
+    task_state,
 )
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, APIError, AnswerMeta
@@ -47,6 +48,9 @@ class RequestPhase(Enum):
     CODE_QUERY = "code_query"
     CODE_RERANK = "code_rerank"
     TOOL_CHOICE = "tool_choice"
+    TASK_PLAN = "task_plan"
+    TASK_EXECUTE = "task_execute"
+    TASK_VALIDATE = "task_validate"
 
 
 @dataclass
@@ -141,6 +145,7 @@ class RepoAgent:
         docs_retriever: Optional[object] = None,
         code_retriever: Optional[object] = None,
         tool_hub: Optional[object] = None,
+        task_provider: Optional[Callable[[], object]] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -182,6 +187,8 @@ class RepoAgent:
         self.tool_hub = tool_hub
         self._last_tool_flow: Optional[mcp_tools.ToolFlowReport] = None
         self._tool_steps: tuple = ()
+        # Состояние задачи приходит функцией: агент не владеет конвейером и не читает его файл.
+        self.task_provider = task_provider
         self._last_citations: Optional[citations.CitationsCheck] = None
         self.restore_context()
 
@@ -501,6 +508,21 @@ class RepoAgent:
         self._ledger.record(meta)
         return meta.content
 
+    def record_usage(self, meta: AnswerMeta) -> None:
+        """Учитывает расход запроса, выполненного вне пути вопроса (шаги конвейера задачи)."""
+        self._ledger.record(meta)
+
+    def _task_message(self) -> Optional[Dict[str, str]]:
+        """Сообщение состояния задачи: этап, шаг и допустимые переходы — для контекста запроса."""
+        if self.task_provider is None:
+            return None
+        try:
+            state = self.task_provider()
+        except Exception:  # noqa: BLE001 - состояние задачи не должно ломать вопрос
+            return None
+        content = task_state.task_message(state) if state is not None else None
+        return {"role": "system", "content": content} if content else None
+
     def code_report(self) -> Optional[object]:
         """Снимок последнего поиска по корпусу кода."""
         return self._last_code_report
@@ -664,7 +686,12 @@ class RepoAgent:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)}
         ]
-        for message in (self._docs_message(), self._code_message(), self._tool_message()):
+        for message in (
+            self._docs_message(),
+            self._code_message(),
+            self._tool_message(),
+            self._task_message(),
+        ):
             if message is not None:
                 messages.append(message)
         if self._citations_enabled():
