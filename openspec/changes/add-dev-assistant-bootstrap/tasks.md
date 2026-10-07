@@ -2,7 +2,7 @@
 
 - [x] 0.1 Репозиторий `ff.ai`, `git init`, `.gitignore`, OpenSpec (`claude`, `opencode`, `oh-my-pi`), `openspec/config.yaml`
 - [x] 0.2 `README.md`, `AGENTS.md`, `docs/design.md`, `docs/roadmap.md`, `docs/domains.md`, `docs/domain-aurora-qt5.md`
-- [ ] 0.3 Первый коммит: каркас, документация, изменение `add-dev-assistant-bootstrap`
+- [x] 0.3 Первый коммит: каркас, документация, изменение `add-dev-assistant-bootstrap`
 
 ## 1. Инструменты сборки и точка входа
 
