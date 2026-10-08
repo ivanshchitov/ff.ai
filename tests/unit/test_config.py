@@ -130,3 +130,60 @@ def test_configured_paths_are_outside_the_target_repository(load_config, tmp_pat
     target.mkdir()
     for path in (cfg.HISTORY_FILE, cfg.MEMORY_FILE, cfg.repo_index_file(target)):
         assert target not in path.parents
+
+
+# --- состояние проекта ----------------------------------------------------------------------
+
+
+def _without_state_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Снимает изоляцию тестов: она задаёт явные пути, а здесь проверяется путь по проекту."""
+    for name in (
+        "FFAI_HISTORY_FILE",
+        "FFAI_MEMORY_FILE",
+        "FFAI_TASK_FILE",
+        "FFAI_SCHEDULE_FILE",
+        "FFAI_TASKS_DIR",
+        "FFAI_EXPORTS_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_project_state_paths_are_keyed_by_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Состояние принадлежит проекту: у двух репозиториев разные файлы истории и памяти."""
+    _without_state_overrides(monkeypatch)
+    first = config.project_paths(tmp_path / "один")
+    second = config.project_paths(tmp_path / "два")
+    assert first["history"] != second["history"]
+    assert first["memory"] != second["memory"]
+    assert first["task"] != second["task"]
+    assert first["schedule"] != second["schedule"]
+    assert first["tasks_dir"] != second["tasks_dir"]
+    assert "projects" in first["history"].parts
+
+
+def test_project_state_paths_are_stable_for_one_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _without_state_overrides(monkeypatch)
+    assert config.project_paths(tmp_path) == config.project_paths(tmp_path)
+
+
+def test_explicit_environment_path_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Явный путь — то, чем пользуются тесты и демонстрации: он побеждает путь по проекту."""
+    explicit = tmp_path / "явный-history.json"
+    monkeypatch.setenv("FFAI_HISTORY_FILE", str(explicit))
+    assert config.project_paths(tmp_path / "проект")["history"] == explicit
+
+
+def test_session_stores_state_under_the_project(tmp_path: Path):
+    """Фасад строит хранилища по путям проекта, а не по общему каталогу состояния."""
+    from core.session import AssistantSession
+
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    session = AssistantSession(root=tmp_path / "repo", domain_id="aurora-qt5", client=None)
+    expected = config.project_paths(tmp_path / "repo")
+    assert session._history.path == expected["history"]
+    assert session._task_store.path == expected["task"]
+    assert session._agent.long_term.path == expected["memory"]
