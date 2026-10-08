@@ -40,6 +40,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from core import config
+from core.answer_settings import AnswerFormat, AnswerSettingsError, ContextStrategy
 from core.api_client import APIError
 from core.session import AnswerReady, AssistantSession, DomainSelected, JournalLine, PhaseChanged
 
@@ -645,6 +647,19 @@ class TaskActionRequest(BaseModel):
     text: str = ""
 
 
+class SettingsRequest(BaseModel):
+    """Частичный набор полей настроек: приходит только то, что пользователь действительно изменил."""
+
+    format: Optional[str] = None
+    context_strategy: Optional[str] = None
+    max_words: Optional[int] = None
+    list_limit: Optional[int] = None
+    temperature: Optional[float] = None
+    compress_after: Optional[int] = None
+    max_session_tokens: Optional[int] = None
+    model: Optional[str] = None
+
+
 # --- приложение -----------------------------------------------------------------------------
 
 
@@ -718,6 +733,7 @@ def create_app(
             "domain": {"id": session.domain.id, "title": session.domain.title},
             "root": str(session.root),
             "model": session.model,
+            "models": list(config.AVAILABLE_MODELS),
             "settings": to_jsonable(session.settings),
             "docs_enabled": session.docs_enabled,
             "code_enabled": session.code_enabled,
@@ -777,6 +793,45 @@ def create_app(
         # `/task run` в TUI ведёт интерфейс; здесь прогон ведёт фоновый исполнитель.
         body["task_run_started"] = runner.start() if result.task_run else False
         bus.publish({"type": "command", "data": body})
+        return body
+
+    @app.post(f"{prefix}/api/settings")
+    def api_settings(payload: SettingsRequest) -> Dict[str, Any]:
+        """Настройки и модель из браузера: частичный набор полей, отказ без изменения действующих.
+
+        Порядок важен: сначала проверяется модель (она не часть `AnswerSettings`), и только потом
+        собирается новый объект настроек. Недопустимое значение отдаёт 400, а сессия остаётся с
+        прежними настройками — та же семантика, что у экрана настроек терминала.
+        """
+        model = payload.model.strip() if payload.model is not None else None
+        if model is not None and model not in config.AVAILABLE_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Неизвестная модель «{model}»; доступны: {', '.join(config.AVAILABLE_MODELS)}",
+            )
+        settings = session.settings
+        try:
+            if payload.format is not None:
+                settings = settings.with_format(AnswerFormat(payload.format))
+            if payload.context_strategy is not None:
+                settings = settings.with_context_strategy(ContextStrategy(payload.context_strategy))
+            if payload.max_words is not None:
+                settings = settings.with_max_words(payload.max_words)
+            if payload.list_limit is not None:
+                settings = settings.with_list_limit(payload.list_limit)
+            if payload.temperature is not None:
+                settings = settings.with_temperature(payload.temperature)
+            if payload.compress_after is not None:
+                settings = settings.with_compress_after(payload.compress_after)
+            if payload.max_session_tokens is not None:
+                settings = settings.with_max_session_tokens(payload.max_session_tokens)
+        except (AnswerSettingsError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        session.settings = settings
+        if model is not None:
+            session.model = model
+        body = {"settings": to_jsonable(session.settings), "model": session.model}
+        bus.publish({"type": "settings", "data": body})
         return body
 
     @app.post(f"{prefix}/api/task")
