@@ -509,17 +509,14 @@ class DevAssistantTUI:
         title = f"Задача {task.number} из {len(state.tasks)}"
         return Group(
             Panel("\n".join(lines), title=title, border_style="cyan"),
+            Rule(style="dim"),
             self._status_line(),
+            Rule(style="dim"),
         )
 
     def _status_line(self) -> Text:
-        usage = self.session.session_usage
-        cost = f"${usage.cost_usd:.6f}" if usage.cost_usd is not None else "неизвестно"
-        return Text.from_markup(
-            f"[dim]Модель: {escape(self.session.model)}  |  Домен: "
-            f"{escape(self.session.domain.id)}  |  "
-            f"Сессия: {usage.total_tokens} ток., {cost}[/dim]"
-        )
+        """Та же строка состояния, но как элемент кадра прогона."""
+        return Text.from_markup(self._status_bar_text())
 
     def _ask_plan_edits(self, live: Live) -> str:
         """Вопрос о правках плана набирается посимвольно: панель показывает набираемое.
@@ -603,11 +600,12 @@ class DevAssistantTUI:
         if task.result_path:
             self.console.print(f"[dim]Отчёт: {escape(task.result_path)}[/dim]")
 
-    def _print_status_bar(self) -> None:
+    def _status_bar_text(self) -> str:
+        """Текст строки состояния: один источник и для печатной полосы, и для кадра прогона."""
         usage = self.session.session_usage
         cost = f"${usage.cost_usd:.6f}" if usage.cost_usd is not None else "неизвестно"
         branch = self.session.branch
-        self.console.print(
+        return (
             f"[dim]Модель: {escape(self.session.model)}  |  "
             f"Домен: {escape(self.session.domain.id)}  |  "
             f"Проект: {escape(self.session.project_name)}  |  "
@@ -617,6 +615,13 @@ class DevAssistantTUI:
             + f"Команды: {' '.join(STATUS_COMMANDS)}  |  "
             f"Сессия: {usage.total_tokens} ток., {cost}[/dim]"
         )
+
+    def _print_status_bar(self) -> None:
+        """Строка состояния полосой: линия сверху закрывает предыдущий блок, линия снизу отделяет
+        её от приглашения — как в доноре, а не хвостом вывода.
+        """
+        self.console.print(Rule(style="dim"))
+        self.console.print(self._status_bar_text())
         self.console.print(Rule(style="dim"))
 
     def _memory_status_fragment(self) -> str:
