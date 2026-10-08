@@ -53,6 +53,22 @@ def is_autostart_enabled() -> bool:
     return value not in ("0", "false", "no", "нет")
 
 
+def is_responding(local_api_url: Optional[str] = None) -> bool:
+    """Отвечает ли локальный сервер на проверку готовности.
+
+    Нужно там, где процесс сервером не управляет: задание планировщика выполняется в процессе
+    сервера репозитория, у которого нет объекта сервера, но ему надо знать, есть ли вообще кто
+    отвечать — иначе сборка индекса пыталась бы считать векторы вслепую и падала.
+    """
+    try:
+        response = requests.get(
+            _base_url_from_local_api(local_api_url) + "/health", timeout=HEALTH_TIMEOUT
+        )
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
+
+
 def start_timeout() -> float:
     """Бюджет готовности в секундах: на медленном диске загрузка весов идёт минутами."""
     value = os.getenv(START_TIMEOUT_ENV, "").strip()
