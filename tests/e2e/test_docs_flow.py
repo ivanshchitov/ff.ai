@@ -122,7 +122,7 @@ def test_disabled_mode_removes_search_and_check(stub, tmp_path: Path):
     _model_double(stub, answer_text=UNCITED)
     session = _launch(tmp_path, stub)
     try:
-        session.send_line("/docs mode off")
+        session.send_line("/rag-docs mode off")
         session.wait_for("Поиск по документации выключен")
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
         assert stub.call_count == 1, "без корпуса нет ни оценки, ни повтора"
@@ -169,7 +169,7 @@ def test_version_question_searches_release_notes(stub, tmp_path: Path):
     session = _launch(tmp_path, stub)
     try:
         session.ask("в какой версии появился фоновый режим геопозиции?", timeout=DOCS_TIMEOUT)
-        session.send_line("/docs")
+        session.send_line("/rag-docs")
         lines = session.wait_for("Разделы:")
         assert "release_notes" in lines, "вопрос о версии ищется и в примечаниях к выпуску"
         assert "версия документации: 5.2.1" in lines
@@ -185,7 +185,7 @@ def test_docs_report_shows_fragments_without_model_requests(stub, tmp_path: Path
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
         before = stub.call_count
-        session.send_line("/docs trace")
+        session.send_line("/rag-docs trace")
         lines = session.wait_for("Доставлено фрагментов:")
         assert "Доставлено фрагментов:" in lines
         assert POSITIONING in lines, "в отчёте видно, какие документы доставлены"
@@ -248,7 +248,7 @@ def test_baseline_mode_skips_the_rating_request(stub, tmp_path: Path):
     _model_double(stub, answer_text=CITED)
     session = _launch(tmp_path, stub)
     try:
-        session.send_line("/docs retrieval baseline")
+        session.send_line("/rag-docs retrieval baseline")
         session.wait_for("Режим отбора: baseline")
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
         assert stub.call_count == 1, "в baseline оценка не запрашивается"
@@ -261,12 +261,12 @@ def test_threshold_command_changes_the_report(stub, tmp_path: Path):
     _model_double(stub, answer_text=CITED)
     session = _launch(tmp_path, stub)
     try:
-        session.send_line("/docs threshold 0.9")
+        session.send_line("/rag-docs threshold 0.9")
         session.wait_for("Порог отбора: 0.90")
-        session.send_line("/docs")
+        session.send_line("/rag-docs")
         assert "порог: 0.90" in session.wait_for("Режим отбора:")
 
-        session.send_line("/docs threshold 5")
+        session.send_line("/rag-docs threshold 5")
         assert "от 0 до 1" in session.wait_for("от 0 до 1")
     finally:
         session.close()

@@ -650,7 +650,7 @@ def read_vectors(database: Path) -> VectorSet:
     """
     database = Path(database)
     if not index_exists(database):
-        return VectorSet(note="индекса нет: соберите его командой /code index")
+        return VectorSet(note="индекса нет: соберите его командой /rag-code index")
     try:
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     except sqlite3.Error as error:

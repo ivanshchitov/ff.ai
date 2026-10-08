@@ -192,7 +192,7 @@ def test_trace_reports_the_search_without_model_requests(session):
     app.ask(QUESTION, timeout=LIVE)
     before = len(stub.requests)
 
-    app.send_line("/code trace")
+    app.send_line("/rag-code trace")
     screen = app.wait_for("Поисковый запрос:", timeout=LIVE)
     assert "ModelList load models.ini" in screen
     assert "Состояние: ok" in screen
@@ -205,7 +205,7 @@ def test_baseline_mode_skips_auxiliary_requests(stub, tmp_path: Path):
     app = _launch(tmp_path, stub)
     try:
         app.wait_for("MCP:", timeout=LIVE)
-        app.send_line("/code retrieval baseline")
+        app.send_line("/rag-code retrieval baseline")
         app.wait_for("Режим отбора: baseline", timeout=LIVE)
         app.ask(QUESTION, timeout=LIVE)
 

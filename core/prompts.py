@@ -149,7 +149,7 @@ def code_state_message(report: object) -> Optional[str]:
         return (
             f"Корпус исходников целевого репозитория недоступен ({error}). Факты о коде без "
             "источника не утверждай: если вопрос про этот проект, скажи, что индекс не читается, "
-            "и предложи собрать его командой /code index."
+            "и предложи собрать его командой /rag-code index."
         )
     if status == "no_matches":
         found = len(getattr(report, "candidates", ()) or ())

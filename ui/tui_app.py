@@ -334,7 +334,7 @@ class DevAssistantTUI:
         if status == "unavailable":
             reason = escape(str(getattr(report, "error", "") or "причина неизвестна"))
             self.console.print(
-                f"[bold yellow]🧩 Корпус кода недоступен: {reason} — соберите индекс /code index[/bold yellow]"
+                f"[bold yellow]🧩 Корпус кода недоступен: {reason} — соберите индекс /rag-code index[/bold yellow]"
             )
         elif status == "no_candidates":
             self.console.print("[dim]🧩 В исходниках по этому вопросу ничего не найдено.[/dim]")

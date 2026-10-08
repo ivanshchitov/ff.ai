@@ -72,7 +72,7 @@ def test_index_builds_outside_the_repository(session, tmp_path: pathlib.Path):
     app, cache = session
     repo_files_before = sorted(path.name for path in (tmp_path / "repo").rglob("*"))
 
-    app.send_line("/code index")
+    app.send_line("/rag-code index")
     app.wait_for("Индекс:", timeout=INDEX_TIMEOUT)
     screen = app.screen_text()
 
@@ -85,14 +85,14 @@ def test_index_builds_outside_the_repository(session, tmp_path: pathlib.Path):
 
 def test_status_without_index_explains_what_to_do(session):
     app, _ = session
-    app.send_line("/code")
+    app.send_line("/rag-code")
     screen = app.wait_for("Индекса нет", timeout=COMMAND_TIMEOUT)
-    assert "/code index" in screen
+    assert "/rag-code index" in screen
 
 
 def test_compare_prints_both_strategies_without_model_requests(session):
     app, _ = session
-    app.send_line("/code compare")
+    app.send_line("/rag-code compare")
     screen = app.wait_for("Сравнение стратегий", timeout=INDEX_TIMEOUT)
 
     assert "fixed: фрагментов" in screen
@@ -106,15 +106,15 @@ def test_compare_prints_both_strategies_without_model_requests(session):
 
 def test_failed_build_keeps_the_previous_index(session, tmp_path: pathlib.Path):
     app, cache = session
-    app.send_line("/code index structural")
+    app.send_line("/rag-code index structural")
     app.wait_for("Стратегия: structural", timeout=INDEX_TIMEOUT)
 
     blocked = cache / "index.sqlite3.tmp"
     blocked.mkdir(parents=True, exist_ok=True)
-    app.send_line("/code index fixed")
+    app.send_line("/rag-code index fixed")
     screen = app.wait_for("Индекс не собран", timeout=INDEX_TIMEOUT)
     assert "остался на месте" in screen
 
     blocked.rmdir()
-    app.send_line("/code status")
+    app.send_line("/rag-code status")
     assert "Стратегия: structural" in app.wait_for("Стратегия:", timeout=COMMAND_TIMEOUT)

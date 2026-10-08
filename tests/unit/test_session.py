@@ -447,7 +447,7 @@ def test_docs_mode_off_disables_search_and_check(repo: Path, docs_retriever, doc
 
     docs_retriever.report = FakeDocsReport(query="вопрос", fragments=(docs_fragment,))
     session = _session(repo, docs_retriever=docs_retriever)
-    result = session.run_command("/docs mode off")
+    result = session.run_command("/rag-docs mode off")
     assert "выключен" in result.lines[0]
     assert not session.docs_enabled
     assert "выключен" in session.docs_lines()[0]
@@ -455,39 +455,39 @@ def test_docs_mode_off_disables_search_and_check(repo: Path, docs_retriever, doc
     session.ask("вопрос")
     assert docs_retriever.queries == [], "выключенный режим не ищет"
 
-    session.run_command("/docs mode on")
+    session.run_command("/rag-docs mode on")
     session.ask("вопрос")
     assert len(docs_retriever.queries) == 1
 
 
 def test_docs_version_command_sets_the_retriever(repo: Path, docs_retriever):
     session = _session(repo, docs_retriever=docs_retriever)
-    result = session.run_command("/docs version 5.1.5")
+    result = session.run_command("/rag-docs version 5.1.5")
     assert "5.1.5" in result.lines[0]
     assert docs_retriever.version == "5.1.5"
     assert docs_retriever.refreshes == 1, "смена версии сбрасывает список версий"
     session.ask("вопрос")
     assert docs_retriever.queries[-1] == ("вопрос", "5.1.5"), "поиск идёт по заданной версии"
 
-    empty = session.run_command("/docs version")
+    empty = session.run_command("/rag-docs version")
     assert "актуальная" in empty.lines[0]
 
 
 def test_docs_command_reports_without_model_requests(repo: Path, docs_retriever):
     client = FakeClient()
     session = _session(repo, client=client, docs_retriever=docs_retriever)
-    session.run_command("/docs")
-    session.run_command("/docs trace")
+    session.run_command("/rag-docs")
+    session.run_command("/rag-docs trace")
     session.ask("вопрос")
     before = len(client.calls)
-    session.run_command("/docs")
-    session.run_command("/docs trace")
+    session.run_command("/rag-docs")
+    session.run_command("/rag-docs trace")
     assert len(client.calls) == before, "отчёты не обращаются к модели"
 
 
 def test_docs_mode_form_is_checked(repo: Path, docs_retriever):
     session = _session(repo, docs_retriever=docs_retriever)
-    result = session.run_command("/docs mode может")
+    result = session.run_command("/rag-docs mode может")
     assert "Форма" in result.lines[0]
     assert session.docs_enabled
 
@@ -510,30 +510,30 @@ def test_docs_retrieval_mode_command(repo: Path, docs_retriever):
     session = _session(repo, docs_retriever=docs_retriever)
     assert session.docs_retrieval == config.DOCS_RETRIEVAL_MODE
 
-    result = session.run_command("/docs retrieval baseline")
+    result = session.run_command("/rag-docs retrieval baseline")
     assert "baseline" in result.lines[0]
     assert session.docs_retrieval == "baseline"
     assert any("Режим отбора" in line for line in result.lines)
 
-    session.run_command("/docs retrieval enhanced")
+    session.run_command("/rag-docs retrieval enhanced")
     assert session.docs_retrieval == "enhanced"
 
-    wrong = session.run_command("/docs retrieval наугад")
+    wrong = session.run_command("/rag-docs retrieval наугад")
     assert "Форма" in wrong.lines[0]
     assert session.docs_retrieval == "enhanced"
 
 
 def test_docs_threshold_command(repo: Path, docs_retriever):
     session = _session(repo, docs_retriever=docs_retriever)
-    result = session.run_command("/docs threshold 0,8")
+    result = session.run_command("/rag-docs threshold 0,8")
     assert "0.80" in result.lines[0]
     assert session.docs_threshold == 0.8
 
     for bad in ("1.5", "-0.1", "много"):
-        wrong = session.run_command(f"/docs threshold {bad}")
+        wrong = session.run_command(f"/rag-docs threshold {bad}")
         assert session.docs_threshold == 0.8, f"значение {bad} не должно применяться"
         assert wrong.lines[0]
-    assert "от 0 до 1" in session.run_command("/docs threshold 1.5").lines[0]
+    assert "от 0 до 1" in session.run_command("/rag-docs threshold 1.5").lines[0]
 
 
 def test_report_shows_mode_threshold_and_scores(repo: Path, docs_retriever):
@@ -572,51 +572,51 @@ def test_no_matches_state_is_reported(repo: Path, docs_retriever):
 
 def test_code_retrieval_mode_command(repo: Path):
     session = _session(repo)
-    result = session.run_command("/code retrieval baseline")
+    result = session.run_command("/rag-code retrieval baseline")
     assert "Режим отбора: baseline" in result.lines[0]
     assert session.code_retrieval == "baseline"
 
-    wrong = session.run_command("/code retrieval какой-то")
-    assert "Форма: /code retrieval" in wrong.lines[0]
+    wrong = session.run_command("/rag-code retrieval какой-то")
+    assert "Форма: /rag-code retrieval" in wrong.lines[0]
     assert session.code_retrieval == "baseline", "негодное значение ничего не меняет"
 
 
 def test_code_threshold_command(repo: Path):
     session = _session(repo)
-    session.run_command("/code threshold 0,75")
+    session.run_command("/rag-code threshold 0,75")
     assert session.code_threshold == 0.75
 
-    wrong = session.run_command("/code threshold 5")
+    wrong = session.run_command("/rag-code threshold 5")
     assert "от 0 до 1" in wrong.lines[0]
     assert session.code_threshold == 0.75
 
 
 def test_code_tune_is_atomic(repo: Path):
     session = _session(repo)
-    result = session.run_command("/code tune before=10 after=2")
+    result = session.run_command("/rag-code tune before=10 after=2")
     assert "до 10 кандидатов, до 2 фрагментов" in result.lines[0]
 
-    wrong = session.run_command("/code tune before=2 after=10")
+    wrong = session.run_command("/rag-code tune before=2 after=10")
     assert "не изменены" in wrong.lines[0]
     config_ = session._agent.config
     assert (config_.code_before, config_.code_after) == (10, 2), "оба поля сохранились"
 
-    form = session.run_command("/code tune before=10")
-    assert "Форма: /code tune" in form.lines[0]
+    form = session.run_command("/rag-code tune before=10")
+    assert "Форма: /rag-code tune" in form.lines[0]
 
 
 def test_code_mode_command(repo: Path):
     session = _session(repo)
     assert session.code_enabled is True
-    session.run_command("/code mode off")
+    session.run_command("/rag-code mode off")
     assert session.code_enabled is False
-    session.run_command("/code mode on")
+    session.run_command("/rag-code mode on")
     assert session.code_enabled is True
 
 
 def test_code_trace_without_search(repo: Path):
     session = _session(repo)
-    lines = session.run_command("/code trace").lines
+    lines = session.run_command("/rag-code trace").lines
     assert any("Режим отбора" in line for line in lines)
     assert any("Поиска ещё не было" in line for line in lines)
 
@@ -653,7 +653,7 @@ def test_code_trace_names_the_vector_ranking(repo: Path):
         repo,
         code_retriever=code_retrieval.CodeRetriever(database, CORPUS, embedding=_FakeEmbedding()),
     )
-    session.run_command("/code retrieval baseline")
+    session.run_command("/rag-code retrieval baseline")
     session.ask("где инициализируется модель списка?")
 
     lines = "\n".join(session.code_trace_lines())
@@ -667,7 +667,7 @@ def test_code_trace_names_the_token_reason(repo: Path):
     database = config.repo_index_file(repo)
     code_index.build_index(repo, CORPUS, code_index.STRATEGY_STRUCTURAL, database)
     session = _session(repo, code_retriever=code_retrieval.CodeRetriever(database, CORPUS))
-    session.run_command("/code retrieval baseline")
+    session.run_command("/rag-code retrieval baseline")
     session.ask("ModelList load")
 
     lines = "\n".join(session.code_trace_lines())
@@ -680,11 +680,11 @@ def test_code_commands_make_no_model_requests(repo: Path):
     client = FakeClient()
     session = _session(repo, client=client)
     for command in (
-        "/code trace",
-        "/code retrieval baseline",
-        "/code threshold 0.5",
-        "/code tune before=5 after=1",
-        "/code mode on",
+        "/rag-code trace",
+        "/rag-code retrieval baseline",
+        "/rag-code threshold 0.5",
+        "/rag-code tune before=5 after=1",
+        "/rag-code mode on",
     ):
         session.run_command(command)
     assert client.calls == []

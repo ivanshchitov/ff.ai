@@ -360,9 +360,9 @@ class AssistantSession:
                 return CommandResult(command="/usage", lines=self.usage_lines())
             if command == "/domain":
                 return self._domain_command(argument)
-            if command == "/docs":
+            if command == "/rag-docs":
                 return self._docs_command(argument)
-            if command == "/code":
+            if command == "/rag-code":
                 return self._code_command(argument)
             if command == "/mcp":
                 return self._mcp_command(argument)
@@ -492,7 +492,7 @@ class AssistantSession:
     def docs_lines(self) -> Tuple[str, ...]:
         """Отчёт о поиске по документации: запрос, разделы, версия, доставленные фрагменты."""
         if not self.docs_enabled:
-            return ("Поиск по документации выключен (/docs mode on — включить).",)
+            return ("Поиск по документации выключен (/rag-docs mode on — включить).",)
         settings = f"Режим отбора: {self.docs_retrieval}; порог: {self.docs_threshold:.2f}"
         report = self.docs_report()
         if report is None:
@@ -540,7 +540,7 @@ class AssistantSession:
         return tuple(lines)
 
     def _docs_command(self, argument: str) -> CommandResult:
-        """`/docs` — отчёт, `mode on|off`, `version <версия>`, `retrieval`, `threshold`, `trace`.
+        """`/rag-docs` — отчёт, `mode on|off`, `version <версия>`, `retrieval`, `threshold`, `trace`.
 
         `trace` — тот же отчёт: подробный вывод уже включает кандидатов, их оценки и причины.
         """
@@ -549,8 +549,8 @@ class AssistantSession:
             value = argument[len("retrieval") :].strip().lower()
             if value not in reranking.MODES:
                 return CommandResult(
-                    command="/docs",
-                    lines=(f"Форма: /docs retrieval {'|'.join(reranking.MODES)}",),
+                    command="/rag-docs",
+                    lines=(f"Форма: /rag-docs retrieval {'|'.join(reranking.MODES)}",),
                 )
             self._agent.config.docs_retrieval = value
             note = (
@@ -559,7 +559,7 @@ class AssistantSession:
                 else "кандидаты доставляются без оценки"
             )
             return CommandResult(
-                command="/docs", lines=(f"Режим отбора: {value} — {note}.",) + self.docs_lines()
+                command="/rag-docs", lines=(f"Режим отбора: {value} — {note}.",) + self.docs_lines()
             )
         if argument.startswith("threshold"):
             value = argument[len("threshold") :].strip().replace(",", ".")
@@ -567,23 +567,23 @@ class AssistantSession:
                 parsed = float(value)
             except ValueError:
                 return CommandResult(
-                    command="/docs", lines=("Форма: /docs threshold <число от 0 до 1>",)
+                    command="/rag-docs", lines=("Форма: /rag-docs threshold <число от 0 до 1>",)
                 )
             if not 0.0 <= parsed <= 1.0:
                 return CommandResult(
-                    command="/docs",
+                    command="/rag-docs",
                     lines=(f"Порог должен быть от 0 до 1, а не {parsed}.",),
                 )
             self._agent.config.docs_threshold = parsed
-            return CommandResult(command="/docs", lines=(f"Порог отбора: {parsed:.2f}.",))
+            return CommandResult(command="/rag-docs", lines=(f"Порог отбора: {parsed:.2f}.",))
         if argument.startswith("mode"):
             value = argument[len("mode") :].strip().lower()
             if value not in ("on", "off"):
-                return CommandResult(command="/docs", lines=("Форма: /docs mode on|off",))
+                return CommandResult(command="/rag-docs", lines=("Форма: /rag-docs mode on|off",))
             self._agent.config.docs_enabled = value == "on"
             state = "включён" if self.docs_enabled else "выключен"
             return CommandResult(
-                command="/docs",
+                command="/rag-docs",
                 lines=(f"Поиск по документации {state}.",)
                 + (self.docs_lines() if self.docs_enabled else ()),
             )
@@ -591,13 +591,13 @@ class AssistantSession:
             value = argument[len("version") :].strip()
             if self._docs_retriever is None:
                 return CommandResult(
-                    command="/docs", lines=("Домен не объявляет корпус документации.",)
+                    command="/rag-docs", lines=("Домен не объявляет корпус документации.",)
                 )
             self._docs_retriever.version = value
             self._docs_retriever.refresh_versions()
             chosen = value or "актуальная по данным сервера"
-            return CommandResult(command="/docs", lines=(f"Версия документации: {chosen}.",))
-        return CommandResult(command="/docs", lines=self.docs_lines())
+            return CommandResult(command="/rag-docs", lines=(f"Версия документации: {chosen}.",))
+        return CommandResult(command="/rag-docs", lines=self.docs_lines())
 
     # --- память, профиль и правила домена -----------------------------------------------------
 
@@ -1330,7 +1330,7 @@ class AssistantSession:
     # --- корпус кода: сборка, состояние, сравнение стратегий --------------------------------
 
     def _code_command(self, argument: str) -> CommandResult:
-        """`/code index [стратегия]`, `/code status`, `/code compare` — без обращений к модели.
+        """`/rag-code index [стратегия]`, `/rag-code status`, `/rag-code compare` — без обращений к модели.
 
         Сборка синхронная: индекс небольшого проекта собирается мгновенно, а большой проект
         пользователь собирает осознанно. Ошибка сборки не затирает прежний индекс — она просто
@@ -1341,7 +1341,7 @@ class AssistantSession:
         corpus = getattr(self.domain, "corpus", None)
         if corpus is None:
             return CommandResult(
-                command="/code", lines=("Домен не объявляет корпус кода.",)
+                command="/rag-code", lines=("Домен не объявляет корпус кода.",)
             )
         if action == "retrieval":
             return self._code_retrieval_command(tokens[1:])
@@ -1352,7 +1352,7 @@ class AssistantSession:
         if action == "mode":
             return self._code_mode_command(tokens[1:])
         if action == "trace":
-            return CommandResult(command="/code", lines=self.code_trace_lines())
+            return CommandResult(command="/rag-code", lines=self.code_trace_lines())
         if action == "index":
             strategy = tokens[1] if len(tokens) > 1 else corpus.strategy
             try:
@@ -1361,33 +1361,33 @@ class AssistantSession:
                 )
             except code_index.CodeIndexError as error:
                 return CommandResult(
-                    command="/code",
+                    command="/rag-code",
                     lines=(
                         f"Индекс не собран: {error}",
                         "Прежний индекс (если был) остался на месте.",
                     ),
                 )
             self._last_code_report = report
-            return CommandResult(command="/code", lines=self.code_lines())
+            return CommandResult(command="/rag-code", lines=self.code_lines())
         if action == "compare":
-            return CommandResult(command="/code", lines=self._code_compare_lines(corpus))
+            return CommandResult(command="/rag-code", lines=self._code_compare_lines(corpus))
         if action != "status":
             return CommandResult(
-                command="/code",
+                command="/rag-code",
                 lines=(
-                    "Форма команды: /code index [fixed|structural], /code status, /code compare, "
-                    "/code retrieval baseline|enhanced, /code threshold <0..1>, "
-                    "/code tune before=<n> after=<n>, /code mode on|off, /code trace",
+                    "Форма команды: /rag-code index [fixed|structural], /rag-code status, /rag-code compare, "
+                    "/rag-code retrieval baseline|enhanced, /rag-code threshold <0..1>, "
+                    "/rag-code tune before=<n> after=<n>, /rag-code mode on|off, /rag-code trace",
                 ),
             )
-        return CommandResult(command="/code", lines=self.code_lines())
+        return CommandResult(command="/rag-code", lines=self.code_lines())
 
     def _code_retrieval_command(self, tokens: List[str]) -> CommandResult:
-        """`/code retrieval baseline|enhanced` — режим отбора кандидатов корпуса кода."""
+        """`/rag-code retrieval baseline|enhanced` — режим отбора кандидатов корпуса кода."""
         value = tokens[0].lower() if tokens else ""
         if value not in reranking.MODES:
             return CommandResult(
-                command="/code", lines=(f"Форма: /code retrieval {'|'.join(reranking.MODES)}",)
+                command="/rag-code", lines=(f"Форма: /rag-code retrieval {'|'.join(reranking.MODES)}",)
             )
         self._agent.config.code_retrieval = value
         note = (
@@ -1396,47 +1396,47 @@ class AssistantSession:
             else "поиск по исходному вопросу, первые результаты без оценки"
         )
         return CommandResult(
-            command="/code", lines=(f"Режим отбора: {value} — {note}.",) + self.code_trace_lines()
+            command="/rag-code", lines=(f"Режим отбора: {value} — {note}.",) + self.code_trace_lines()
         )
 
     def _code_threshold_command(self, tokens: List[str]) -> CommandResult:
-        """`/code threshold <число от 0 до 1>` — порог отбора кандидатов."""
+        """`/rag-code threshold <число от 0 до 1>` — порог отбора кандидатов."""
         raw = (tokens[0].replace(",", ".") if tokens else "")
         try:
             parsed = float(raw)
         except ValueError:
             return CommandResult(
-                command="/code", lines=("Форма: /code threshold <число от 0 до 1>",)
+                command="/rag-code", lines=("Форма: /rag-code threshold <число от 0 до 1>",)
             )
         if not 0.0 <= parsed <= 1.0:
             return CommandResult(
-                command="/code", lines=(f"Порог должен быть от 0 до 1, а не {parsed}.",)
+                command="/rag-code", lines=(f"Порог должен быть от 0 до 1, а не {parsed}.",)
             )
         self._agent.config.code_threshold = parsed
-        return CommandResult(command="/code", lines=(f"Порог отбора: {parsed:.2f}.",))
+        return CommandResult(command="/rag-code", lines=(f"Порог отбора: {parsed:.2f}.",))
 
     def _code_tune_command(self, tokens: List[str]) -> CommandResult:
-        """`/code tune before=<n> after=<n>` — пулы кандидатов и фрагментов, целиком атомарно.
+        """`/rag-code tune before=<n> after=<n>` — пулы кандидатов и фрагментов, целиком атомарно.
 
         Негодная пара не меняет ни одно поле: половинчатые настройки опаснее отказа, потому что
         выглядят применёнными.
         """
-        form = "Форма: /code tune before=<кандидатов> after=<фрагментов>"
+        form = "Форма: /rag-code tune before=<кандидатов> after=<фрагментов>"
         values = {}
         for token in tokens:
             key, separator, value = token.partition("=")
             if not separator or key not in ("before", "after"):
-                return CommandResult(command="/code", lines=(form,))
+                return CommandResult(command="/rag-code", lines=(form,))
             try:
                 values[key] = int(value)
             except ValueError:
-                return CommandResult(command="/code", lines=(form,))
+                return CommandResult(command="/rag-code", lines=(form,))
         if set(values) != {"before", "after"}:
-            return CommandResult(command="/code", lines=(form,))
+            return CommandResult(command="/rag-code", lines=(form,))
         before, after = values["before"], values["after"]
         if before < 1 or after < 1 or after > before:
             return CommandResult(
-                command="/code",
+                command="/rag-code",
                 lines=(
                     f"Пул кандидатов {before}, фрагментов {after}: нужно before ≥ 1, "
                     "1 ≤ after ≤ before. Настройки не изменены.",
@@ -1445,19 +1445,19 @@ class AssistantSession:
         self._agent.config.code_before = before
         self._agent.config.code_after = after
         return CommandResult(
-            command="/code",
+            command="/rag-code",
             lines=(f"Пулы: до {before} кандидатов, до {after} фрагментов.",) + self.code_trace_lines(),
         )
 
     def _code_mode_command(self, tokens: List[str]) -> CommandResult:
-        """`/code mode on|off` — поиск по корпусу кода целиком."""
+        """`/rag-code mode on|off` — поиск по корпусу кода целиком."""
         value = tokens[0].lower() if tokens else ""
         if value not in ("on", "off"):
-            return CommandResult(command="/code", lines=("Форма: /code mode on|off",))
+            return CommandResult(command="/rag-code", lines=("Форма: /rag-code mode on|off",))
         self._agent.config.code_enabled = value == "on"
         state = "включён" if self._agent.config.code_enabled else "выключен"
         return CommandResult(
-            command="/code",
+            command="/rag-code",
             lines=(f"Поиск по корпусу кода {state}.",)
             + (self.code_trace_lines() if self._agent.config.code_enabled else ()),
         )
@@ -1466,7 +1466,7 @@ class AssistantSession:
         """Отчёт о последнем поиске по корпусу кода: запрос, режим, оценки, доставленное."""
         config_ = self._agent.config
         if not config_.code_enabled:
-            return ("Поиск по корпусу кода выключен (/code mode on — включить).",)
+            return ("Поиск по корпусу кода выключен (/rag-code mode on — включить).",)
         settings = (
             f"Режим отбора: {config_.code_retrieval}; порог: {config_.code_threshold:.2f}; "
             f"пулы: до {config_.code_before} кандидатов, до {config_.code_after} фрагментов"
@@ -1506,7 +1506,7 @@ class AssistantSession:
         if report is None:
             return (
                 f"Индекса нет. Путь: {database}",
-                "Собрать: /code index [fixed|structural]; сравнить стратегии: /code compare",
+                "Собрать: /rag-code index [fixed|structural]; сравнить стратегии: /rag-code compare",
             )
         lines = [
             f"Индекс: {report.database}",
@@ -1529,7 +1529,7 @@ class AssistantSession:
             lines.append(f"    {strategy}: фрагментов — {len(chunks)}")
             for label in code_index.sample_labels(chunks):
                 lines.append(f"        {label}")
-        lines.append("Индекс не изменялся: /code index <стратегия> собирает выбранную.")
+        lines.append("Индекс не изменялся: /rag-code index <стратегия> собирает выбранную.")
         return tuple(lines)
 
 
