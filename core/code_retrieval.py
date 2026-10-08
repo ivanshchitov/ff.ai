@@ -301,6 +301,8 @@ class CodeRetriever:
                 status=STATUS_UNAVAILABLE,
                 error=vectors_note,
                 chunks=len(chunks),
+                ranking=RANKING_VECTORS,
+                ranking_note=vectors_note,
                 **settings,
             )
 

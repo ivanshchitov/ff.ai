@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core import code_index, code_retrieval, config, domains
+from core.embeddings import EmbeddingsError
 
 CORPUS = domains.load_domain("aurora-qt5").corpus
 
@@ -358,3 +359,220 @@ def test_rate_lines_show_scores(retriever):
     lines = code_retrieval.rate_lines(report.candidates[:2])
     assert len(lines) == 2
     assert all("—" in line for line in lines)
+
+
+# --- векторный путь -------------------------------------------------------------------------
+
+
+class FakeEmbedding:
+    """Векторная модель-заглушка: тема текста вместо весов — семантика без сети.
+
+    Пространство трёхмерное и осмысленное: «модель списка», «подпись пакета» и «рисование»
+    разнесены по осям, поэтому русский вопрос и английский код одной темы близки, а разных — нет.
+    Настоящая модель доказывает то же самое живьём (`docs/roadmap.md`, живой прогон фазы), но
+    проверка не должна зависеть от загруженных весов и от сервера.
+    """
+
+    TOPICS = (
+        ("списк", "modellist", "qabstractlistmodel", "models.ini"),
+        ("пакет", "подпись", "spec", "rpm"),
+        ("рисуется", "фон", "график", "painter", "renderer", "brush"),
+    )
+
+    def __init__(self, model: str = "fake-embed", dimensions: int = None) -> None:
+        self.model = model
+        self._dimensions = dimensions or len(self.TOPICS)
+
+    def embed(self, text: str):
+        return self._vector(text)
+
+    def embed_query(self, text: str):
+        return self._vector(text)
+
+    def _vector(self, text: str):
+        lowered = (text or "").casefold()
+        values = [
+            1.0 if any(stem in lowered for stem in stems) else 0.0 for stems in self.TOPICS
+        ]
+        if self._dimensions != len(self.TOPICS):
+            values = values[: self._dimensions]
+        return values
+
+
+class BrokenQueryEmbedding(FakeEmbedding):
+    """Модель, которая отвечает на фрагменты, но падает на векторе вопроса."""
+
+    def embed_query(self, text: str):
+        raise EmbeddingsError("сервер не отвечает")
+
+
+def _vector_index(repository: Path, tmp_path: Path, provider=None):
+    database = tmp_path / "cache" / "vectors.sqlite3"
+    code_index.build_index(
+        repository,
+        CORPUS,
+        code_index.STRATEGY_STRUCTURAL,
+        database,
+        provider=provider or FakeEmbedding(),
+    )
+    return database
+
+
+def test_russian_question_finds_english_code_by_vectors(repository: Path, tmp_path: Path):
+    """Приёмка фазы: векторный поиск сближает языки, и переформулировка больше не нужна."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    def forbidden(*args, **kwargs):  # pragma: no cover - вызов означает лишний запрос
+        raise AssertionError("векторному поиску переформулировка не нужна")
+
+    report = retriever.search(
+        "где инициализируется модель списка моделей?",
+        mode="baseline",
+        rewrite=forbidden,
+        rate=forbidden,
+        ranking="vectors",
+    )
+
+    assert report.status == code_retrieval.STATUS_OK
+    assert report.ranking == code_retrieval.RANKING_VECTORS
+    assert report.candidates[0].path.startswith("src/models.cpp")
+    assert report.fragments[0].identifier.startswith("src/models.cpp")
+    assert report.candidates[0].score == pytest.approx(1.0), "оценка — косинус векторов"
+    assert report.ranking_note == "векторная модель fake-embed"
+
+
+def test_tokens_on_the_same_index_find_nothing_in_russian(repository: Path, tmp_path: Path):
+    """Контраст к предыдущему: токенам языки мешают, и это видно, а не спрятано."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    report = retriever.search("где инициализируется модель списка моделей?", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_VECTORS, (
+        "по умолчанию индекс с векторами идёт по векторам"
+    )
+    assert report.ranking_note.startswith("векторная модель")
+
+    tokens = retriever.search(
+        "где инициализируется модель списка моделей?", mode="baseline", ranking="tokens"
+    )
+    assert tokens.ranking == code_retrieval.RANKING_TOKENS
+    assert tokens.ranking_note == "выбран явный токенный режим"
+    assert tokens.status == code_retrieval.STATUS_NO_CANDIDATES
+
+
+def test_explicit_token_mode_still_ranks_by_identifiers(repository: Path, tmp_path: Path):
+    """Токенный режим нужен на идентификаторах: `ModelList` он находит по буквам, а не по теме."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    report = retriever.search("ModelList load settings", mode="baseline", ranking="tokens")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert report.candidates[0].path.startswith("src/models.cpp")
+
+
+def test_enhanced_with_vectors_skips_the_rewrite(repository: Path, tmp_path: Path):
+    """Переформулировка — лекарство от несовпадения языков; с векторами её место занимает модель."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+    question = "где инициализируется модель списка моделей?"
+
+    def forbidden(question: str) -> str:  # pragma: no cover - вызов означает лишний запрос
+        raise AssertionError("переформулировка не нужна, когда вопрос понимает векторная модель")
+
+    report = retriever.search(
+        question,
+        mode="enhanced",
+        rewrite=forbidden,
+        rate=lambda q, candidates: _ratings(candidates),
+    )
+
+    assert report.ranking == code_retrieval.RANKING_VECTORS
+    assert report.query == question, "поисковый запрос — сам вопрос"
+    assert report.status == code_retrieval.STATUS_OK
+    assert report.rated is True
+
+
+def test_strict_vector_mode_is_visible_without_vectors(repository: Path, tmp_path: Path):
+    """Строгий режим не подменяет векторы токенами молча: он называет причину и не доставляет."""
+    database = tmp_path / "cache" / "index.sqlite3"
+    code_index.build_index(repository, CORPUS, code_index.STRATEGY_STRUCTURAL, database)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    report = retriever.search("ModelList", mode="baseline", ranking="vectors")
+
+    assert report.status == code_retrieval.STATUS_UNAVAILABLE
+    assert report.fragments == ()
+    assert "вектор" in report.error
+
+
+def test_vectors_of_another_model_are_not_used(repository: Path, tmp_path: Path):
+    """Смешать пространства двух моделей — получить оценку без смысла, поэтому чужое не берётся."""
+    database = _vector_index(repository, tmp_path, provider=FakeEmbedding("fake-embed"))
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding("other-embed"))
+
+    report = retriever.search("ModelList load", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert "fake-embed" in report.ranking_note and "other-embed" in report.ranking_note
+    assert report.status == code_retrieval.STATUS_OK, "токенный путь остаётся рабочим"
+
+
+def test_provider_absence_is_named_when_the_index_has_vectors(repository: Path, tmp_path: Path):
+    """Локального сервера нет — причина в отчёте, а поиск идёт токенным путём (автозапуск выключен)."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS)  # провайдер берётся по умолчанию
+
+    report = retriever.search("ModelList load", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert "FFAI_LLAMA_AUTOSTART" in report.ranking_note
+    assert report.status == code_retrieval.STATUS_OK
+
+
+def test_index_without_vectors_names_the_reason(repository: Path, tmp_path: Path):
+    """Индекс собран без векторов — отчёт говорит, почему, а не молчит о способе."""
+    database = tmp_path / "cache" / "index.sqlite3"
+    code_index.build_index(repository, CORPUS, code_index.STRATEGY_STRUCTURAL, database)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    report = retriever.search("ModelList load", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert "автозапуск" in report.ranking_note
+
+
+def test_query_embedding_failure_degrades_visibly(repository: Path, tmp_path: Path):
+    """Сбой модели на векторе вопроса — названная причина, а не выдача токенного за векторный."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=BrokenQueryEmbedding())
+
+    report = retriever.search("ModelList load", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert "сервер не отвечает" in report.ranking_note
+
+
+def test_changed_dimensions_degrade_visibly(repository: Path, tmp_path: Path):
+    """Чужая размерность вектора запроса обнаруживается на сравнении, а не превращается в ноль."""
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(
+        database, CORPUS, embedding=FakeEmbedding("fake-embed", dimensions=1)
+    )
+
+    report = retriever.search("ModelList load", mode="baseline")
+
+    assert report.ranking == code_retrieval.RANKING_TOKENS
+    assert "размерности" in report.ranking_note
+
+
+def test_unknown_ranking_is_disabled(repository: Path, tmp_path: Path):
+    database = _vector_index(repository, tmp_path)
+    retriever = code_retrieval.CodeRetriever(database, CORPUS, embedding=FakeEmbedding())
+
+    report = retriever.search("ModelList", mode="baseline", ranking="какой-то")
+
+    assert report.status == code_retrieval.STATUS_DISABLED
+    assert "способ ранжирования" in report.error

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core import config
+from core import code_index, code_retrieval, config, domains
 from core.agent import RequestPhase
 from core.answer_settings import AnswerFormat
 from core.api_client import APIError, AnswerMeta
@@ -15,6 +15,8 @@ from core.history_manager import HistoryManager
 from core.mcp_client import MCPError
 from core.session import AnswerReady, AssistantSession, JournalLine, PhaseChanged
 from tests.conftest import rerank_answer
+
+CORPUS = domains.load_domain("aurora-qt5").corpus
 
 
 class FakeClient:
@@ -617,6 +619,61 @@ def test_code_trace_without_search(repo: Path):
     lines = session.run_command("/code trace").lines
     assert any("Режим отбора" in line for line in lines)
     assert any("Поиска ещё не было" in line for line in lines)
+
+
+class _FakeEmbedding:
+    """Векторная модель-заглушка: одна ось на любой текст — строка отчёта проверяется без сети."""
+
+    model = "fake-embed"
+
+    def embed(self, text: str):
+        return [1.0, 0.0]
+
+    def embed_query(self, text: str):
+        return [1.0, 0.0]
+
+
+def _write_models(repo: Path) -> Path:
+    source = repo / "src" / "models.cpp"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "class ModelList : public QObject {\n    void load();\n};\n", encoding="utf-8"
+    )
+    return source
+
+
+def test_code_trace_names_the_vector_ranking(repo: Path):
+    """Отчёт поиска называет способ ранжирования и модель, которой считали векторы."""
+    _write_models(repo)
+    database = config.repo_index_file(repo)
+    code_index.build_index(
+        repo, CORPUS, code_index.STRATEGY_STRUCTURAL, database, provider=_FakeEmbedding()
+    )
+    session = _session(
+        repo,
+        code_retriever=code_retrieval.CodeRetriever(database, CORPUS, embedding=_FakeEmbedding()),
+    )
+    session.run_command("/code retrieval baseline")
+    session.ask("где инициализируется модель списка?")
+
+    lines = "\n".join(session.code_trace_lines())
+
+    assert "Ранжирование: vectors — векторная модель fake-embed" in lines
+
+
+def test_code_trace_names_the_token_reason(repo: Path):
+    """Индекс без векторов — причина в отчёте: токенный поиск не выдаётся за векторный."""
+    _write_models(repo)
+    database = config.repo_index_file(repo)
+    code_index.build_index(repo, CORPUS, code_index.STRATEGY_STRUCTURAL, database)
+    session = _session(repo, code_retriever=code_retrieval.CodeRetriever(database, CORPUS))
+    session.run_command("/code retrieval baseline")
+    session.ask("ModelList load")
+
+    lines = "\n".join(session.code_trace_lines())
+
+    assert "Ранжирование: tokens" in lines
+    assert "автозапуск" in lines
 
 
 def test_code_commands_make_no_model_requests(repo: Path):

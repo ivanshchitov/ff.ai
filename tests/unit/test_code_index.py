@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core import code_index, config, domains
+from core.embeddings import EmbeddingsError
 
 CORPUS = domains.load_domain("aurora-qt5").corpus
 
@@ -283,3 +284,142 @@ def test_file_at_the_size_limit_is_kept(tmp_path: Path):
     kept = {path.name for path in result.files}
     assert "exact.cpp" in kept
     assert "over.cpp" not in kept
+
+
+# --- векторы в индексе ----------------------------------------------------------------------
+
+
+class FakeVectors:
+    """Векторная модель-заглушка: вектор заданной длины, без сети и без загруженных весов."""
+
+    def __init__(self, model: str = "fake-embed", dimensions: int = 3) -> None:
+        self.model = model
+        self.dimensions = dimensions
+        self.seen: list = []
+
+    def embed(self, text: str):
+        self.seen.append(text)
+        return [1.0] + [0.0] * (self.dimensions - 1)
+
+
+class BrokenVectors(FakeVectors):
+    """Модель, отвечающая на первые фрагменты и падающая на одном из следующих."""
+
+    def __init__(self, model: str = "fake-embed", fail_after: int = 1) -> None:
+        super().__init__(model)
+        self.fail_after = fail_after
+
+    def embed(self, text: str):
+        if len(self.seen) >= self.fail_after:
+            raise EmbeddingsError("сервер не отвечает")
+        return super().embed(text)
+
+
+class ShiftingVectors(FakeVectors):
+    """Модель, у которой сменилась размерность посреди корпуса — признак смены весов пресета."""
+
+    def embed(self, text: str):
+        self.seen.append(text)
+        width = self.dimensions if len(self.seen) == 1 else self.dimensions - 1
+        return [1.0] + [0.0] * (width - 1)
+
+
+def test_build_with_provider_stores_vectors_for_every_chunk(tmp_path: Path):
+    """Вектор есть у каждого фрагмента, и записано, какой моделью он посчитан."""
+    root = _project(tmp_path)
+    database = _cache(tmp_path)
+    provider = FakeVectors()
+
+    report = code_index.build_index(
+        root, CORPUS, code_index.STRATEGY_STRUCTURAL, database, provider=provider
+    )
+
+    assert report.vector_model == "fake-embed"
+    assert report.vectors == report.chunks
+    assert report.vector_note == ""
+    assert len(provider.seen) == report.chunks
+
+    vector_set = code_index.read_vectors(database)
+    assert vector_set.model == "fake-embed"
+    assert set(vector_set.vectors) == {
+        chunk.chunk_id for chunk in code_index.read_chunks(database)
+    }
+    assert all(len(vector) == 3 for vector in vector_set.vectors.values())
+    assert vector_set.note == ""
+
+    restored = code_index.read_index(database)
+    assert restored is not None
+    assert (restored.vector_model, restored.vectors) == ("fake-embed", report.chunks)
+
+
+def test_build_without_provider_keeps_the_token_path_and_names_the_reason(tmp_path: Path):
+    """Провайдера нет — индекс собирается токенным, и причина видна, а не спрятана."""
+    root = _project(tmp_path)
+    database = _cache(tmp_path)
+
+    report = code_index.build_index(root, CORPUS, code_index.STRATEGY_FIXED, database)
+
+    assert (report.vectors, report.vector_model) == (0, "")
+    assert "FFAI_LLAMA_AUTOSTART" in report.vector_note
+    assert code_index.read_chunks(database), "токенный поиск работает и без векторов"
+    assert code_index.read_vectors(database).note == report.vector_note
+
+
+def test_embedding_failure_keeps_the_previous_index(tmp_path: Path):
+    """Сбой модели отменяет сборку целиком: прежний индекс с векторами остаётся пригодным."""
+    root = _project(tmp_path)
+    database = _cache(tmp_path)
+    first = code_index.build_index(
+        root, CORPUS, code_index.STRATEGY_FIXED, database, provider=FakeVectors()
+    )
+
+    with pytest.raises(code_index.CodeIndexError) as error:
+        code_index.build_index(
+            root, CORPUS, code_index.STRATEGY_STRUCTURAL, database, provider=BrokenVectors()
+        )
+
+    assert "сервер не отвечает" in str(error.value)
+    assert not (database.parent / "code-index.sqlite3.tmp").exists(), "временный файл убран"
+    restored = code_index.read_index(database)
+    assert restored is not None
+    assert restored.strategy == code_index.STRATEGY_FIXED
+    assert restored.vectors == first.vectors, "прежние векторы не тронуты"
+    assert code_index.read_vectors(database).model == "fake-embed"
+
+
+def test_changed_dimensions_cancel_the_build(tmp_path: Path):
+    """Размерность изменилась посреди корпуса — числа несопоставимы, сборка не состоится."""
+    root = _project(tmp_path)
+    database = _cache(tmp_path)
+    code_index.build_index(
+        root, CORPUS, code_index.STRATEGY_FIXED, database, provider=FakeVectors()
+    )
+
+    with pytest.raises(code_index.CodeIndexError) as error:
+        code_index.build_index(
+            root, CORPUS, code_index.STRATEGY_STRUCTURAL, database, provider=ShiftingVectors()
+        )
+
+    assert "размерность" in str(error.value)
+    restored = code_index.read_index(database)
+    assert restored is not None and restored.strategy == code_index.STRATEGY_FIXED
+
+
+def test_old_schema_index_is_not_read_as_usable(tmp_path: Path):
+    """Индекс прошлой версии схемы не читается как пригодный: пересборка объявляется, а не подразумевается."""
+    import sqlite3
+
+    root = _project(tmp_path)
+    database = _cache(tmp_path)
+    code_index.build_index(
+        root, CORPUS, code_index.STRATEGY_FIXED, database, provider=FakeVectors()
+    )
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE metadata SET value = '1' WHERE key = 'schema'")
+    connection.commit()
+    connection.close()
+
+    assert code_index.read_index(database) is None
+    assert code_index.read_chunks(database) == ()
+    assert code_index.read_vectors(database).model == ""
+    assert "пересоберите" in code_index.read_vectors(database).note
