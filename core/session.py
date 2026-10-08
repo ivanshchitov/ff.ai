@@ -26,7 +26,9 @@ from . import (
     domains,
     mcp_registry,
     mcp_tools,
+    long_term_memory,
     memory_layers,
+    schedule_store,
     user_profile,
     patches,
     reranking,
@@ -150,7 +152,13 @@ class AssistantSession:
         self._lock = threading.RLock()
         self._listeners: List[Callable[[object], None]] = []
         self._exit_requested = False
-        self._history = history if history is not None else HistoryManager()
+        # Состояние проекта: история, память, задачи, расписание и отчёты живут в поддереве,
+        # привязанном к пути целевого репозитория, — инструмент запускают из корня проекта, и
+        # показывать в нём состояние другого проекта нельзя.
+        self._project_paths = config.project_paths(self.root)
+        self._history = (
+            history if history is not None else HistoryManager(path=self._project_paths["history"])
+        )
         self._selection = domains.select_domain(
             root=self.root, explicit=domain_id, domains_dir=domains_dir
         )
@@ -186,8 +194,10 @@ class AssistantSession:
             code_retriever=self._code_retriever,
             tool_hub=self._tool_hub(),
             task_provider=lambda: self._pipeline.state,
+            long_term=long_term_memory.LongTermMemory(self._project_paths["memory"]),
+            schedule=schedule_store.ScheduleStore(self._project_paths["schedule"]),
         )
-        self._task_store = task_state.TaskStore()
+        self._task_store = task_state.TaskStore(self._project_paths["task"])
         self._pipeline = task_pipeline.TaskPipeline(
             domain=self._selection.domain,
             root=self.root,
@@ -195,7 +205,11 @@ class AssistantSession:
             ask=self._task_ask,
             prepare=self._task_prepare,
             build=self._task_build,
+            # Отчёты задачи пишутся в поддерево проекта, а не в общий каталог состояния.
+            tasks_dir=self._project_paths["tasks_dir"],
         )
+        # Каталог выгрузок читает серверный процесс: он получает его из окружения приложения.
+        os.environ.setdefault("FFAI_EXPORTS_DIR", str(self._project_paths["exports_dir"]))
         # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
         self._patch_confirmation: Optional[Callable[[str, str], bool]] = None
         # Конвейер операций: исполнитель команд и подтверждение необратимых шагов приходят

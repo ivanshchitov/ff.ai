@@ -58,6 +58,35 @@ TASKS_DIR = _env_path("FFAI_TASKS_DIR", STATE_DIR / "tasks")
 EXPORTS_DIR = _env_path("FFAI_EXPORTS_DIR", STATE_DIR / "reports")
 
 
+def project_dir(root: Path) -> Path:
+    """Каталог состояния целевого проекта: своё поддерево на каждый репозиторий.
+
+    Инструмент запускают из корня проекта, и он должен работать с *этим* проектом: история, память,
+    задачи и отчёты одного репозитория не должны показываться в другом. Ключ — путь репозитория,
+    поэтому один и тот же проект всегда попадает в своё поддерево, а перенос каталога даёт новое
+    (устаревшее состояние лучше не показывать вовсе).
+    """
+    digest = hashlib.sha1(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
+    return STATE_DIR / "projects" / digest
+
+
+def project_paths(root: Path) -> Dict[str, Path]:
+    """Пути состояния проекта: явная переменная окружения побеждает путь по проекту.
+
+    Явный путь — это то, чем пользуются тесты и демонстрации: переопределив файл, они должны
+    получить ровно его, а не поддерево проекта.
+    """
+    base = project_dir(root)
+    return {
+        "history": _env_path("FFAI_HISTORY_FILE", base / "history.json"),
+        "memory": _env_path("FFAI_MEMORY_FILE", base / "memory.json"),
+        "task": _env_path("FFAI_TASK_FILE", base / "task.json"),
+        "schedule": _env_path("FFAI_SCHEDULE_FILE", base / "schedule.json"),
+        "tasks_dir": _env_path("FFAI_TASKS_DIR", base / "tasks"),
+        "exports_dir": _env_path("FFAI_EXPORTS_DIR", base / "reports"),
+    }
+
+
 def repo_index_file(root: Path) -> Path:
     """Путь индекса для целевого репозитория: свой подкаталог кэша на каждый репозиторий."""
     override = os.getenv("FFAI_INDEX_FILE")
