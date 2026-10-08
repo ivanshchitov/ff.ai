@@ -9,9 +9,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import time
+
 import pytest
 
 from .harness import AppSession
+
+# Запас на обход реестра: он поднимает процесс сервера, поэтому бюджет задаётся по природе
+# операции, а не по времени отрисовки экрана.
+REFRESH_BUDGET = 60.0
+WAIT_STEP = 15.0  # шаг ожидания: столько же, сколько даёт стенд по умолчанию
 
 pytestmark = pytest.mark.e2e
 
@@ -46,8 +53,23 @@ def test_report_lists_server_protocol_and_tools(app, stub):
 
 
 def test_refresh_walks_the_registry_again(app, stub):
-    app.send_line("/mcp refresh")
-    text = app.wait_for("Реестр обойдён заново")
+    """Обход реестра — это запуск процесса сервера, поэтому ждём результат, а не таймер.
+
+    Обычного запаса стенда здесь мало по природе операции: под нагрузкой запуск процесса и
+    рукопожатие занимают больше секунд, чем отрисовка экрана. Поэтому команда повторяется, пока
+    обход не завершится, и тест падает только если обход не удаётся вовсе.
+    """
+    deadline = time.monotonic() + REFRESH_BUDGET
+    text = ""
+    while time.monotonic() < deadline:
+        app.send_line("/mcp refresh")
+        try:
+            text = app.wait_for("Реестр обойдён заново", timeout=WAIT_STEP)
+            break
+        except AssertionError:
+            continue
+    else:
+        raise AssertionError(f"обход реестра не завершился за {REFRESH_BUDGET:g} с")
     assert "1/1 серверов" in text
     assert stub.call_count == 0
 
