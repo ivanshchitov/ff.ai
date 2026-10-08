@@ -68,7 +68,7 @@
   вопросов о версиях (данные, а не код).
 - Тесты: `tests/unit/test_docs_retrieval.py`, `tests/unit/test_citations.py` (новые),
   `tests/fake_docs_server.py` (заглушка сервера документации по stdio со своим маленьким
-  корпусом), дополнения в `test_tabletop_agent`-аналоге (`test_agent.py`), `test_session.py`,
+  корпусом), дополнения в `test_agent.py`, `test_session.py`,
   `test_tui_app.py`, сквозной `tests/e2e/test_docs_flow.py`, сетевой `test_docs_network.py`.
 - Документация: `README.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/domain-aurora-qt5.md`
   (что механизм делает, а что остаётся за промптом).

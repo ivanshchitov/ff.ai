@@ -75,9 +75,9 @@ def test_block_over_the_limit_keeps_the_newest_keys():
 
 
 def test_render_facts_lists_pairs():
-    text = strategies.render_facts({"цель": "ТЗ", "жанр": "настольные игры"})
+    text = strategies.render_facts({"цель": "ТЗ", "платформа": "ОС Аврора"})
 
-    assert "цель: ТЗ" in text and "жанр: настольные игры" in text
+    assert "цель: ТЗ" in text and "платформа: ОС Аврора" in text
 
 
 def test_render_facts_of_empty_block_is_empty():
@@ -89,9 +89,9 @@ def test_parse_direct_json_object():
 
 
 def test_parse_json_inside_code_block():
-    text = 'Вот факты:\n```json\n{"жанр": "карточная"}\n```\n'
+    text = 'Вот факты:\n```json\n{"сборка": "qmake"}\n```\n'
 
-    assert strategies.parse_facts_response(text) == {"жанр": "карточная"}
+    assert strategies.parse_facts_response(text) == {"сборка": "qmake"}
 
 
 def test_parse_of_empty_object_is_an_empty_block_not_a_failure():

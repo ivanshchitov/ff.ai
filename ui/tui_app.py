@@ -618,7 +618,7 @@ class DevAssistantTUI:
 
     def _print_status_bar(self) -> None:
         """Строка состояния полосой: линия сверху закрывает предыдущий блок, линия снизу отделяет
-        её от приглашения — как в доноре, а не хвостом вывода.
+        её от приглашения — иначе строка читается хвостом вывода.
         """
         self.console.print(Rule(style="dim"))
         self.console.print(self._status_bar_text())

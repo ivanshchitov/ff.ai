@@ -189,13 +189,13 @@ def test_usage_block_survives_reload(history_path):
 
 def test_facts_are_saved_and_reloaded(history_path):
     manager = HistoryManager(path=history_path)
-    manager.set_facts({"цель": "собрать ТЗ", "жанр": "настольные игры"})
+    manager.set_facts({"цель": "собрать ТЗ", "платформа": "ОС Аврора"})
 
     saved = json.loads(history_path.read_text(encoding="utf-8"))
-    assert saved["facts"] == {"цель": "собрать ТЗ", "жанр": "настольные игры"}
+    assert saved["facts"] == {"цель": "собрать ТЗ", "платформа": "ОС Аврора"}
 
     reloaded = HistoryManager(path=history_path)
-    assert reloaded.facts == {"цель": "собрать ТЗ", "жанр": "настольные игры"}
+    assert reloaded.facts == {"цель": "собрать ТЗ", "платформа": "ОС Аврора"}
 
 
 def test_missing_facts_key_reads_as_an_empty_block(history_path):
@@ -288,11 +288,11 @@ def test_envelope_carries_working_beside_facts(history_path):
     """Слои хранятся раздельно: рабочая память — свой блок конверта, долговременная — свой файл."""
     manager = HistoryManager(path=history_path)
     manager.add("q", "a")
-    manager.set_facts({"жанр": "евро"})
+    manager.set_facts({"сборка": "qmake"})
     manager.set_working({"цель": "собрать партию"})
 
     saved = json.loads(history_path.read_text(encoding="utf-8"))
 
     assert saved["working"] == {"цель": "собрать партию"}
-    assert saved["facts"] == {"жанр": "евро"}
+    assert saved["facts"] == {"сборка": "qmake"}
     assert "опыт" not in json.dumps(saved)
