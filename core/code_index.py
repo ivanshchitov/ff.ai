@@ -7,6 +7,11 @@
 Индекс — производное репозитория: он лежит в кэше состояния, собирается только по команде и
 никогда не пишется в целевой репозиторий. Сборка идёт во временный файл рядом и заменяет прежний
 индекс одним `os.replace` после успешной записи.
+
+Рядом с фрагментами индекс хранит их векторы — по модели, которой они посчитаны (`core/embeddings.py`).
+Вектор чужой модели не используется: у каждой модели своё пространство, и смешать их значит получить
+оценку без смысла. Сбой векторной модели отменяет сборку целиком — индекс с векторами у части
+фрагментов ранжировал бы по остатку.
 """
 
 from __future__ import annotations
@@ -14,21 +19,26 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from . import embeddings
 from .domains import DomainCorpus
 
 STRATEGY_FIXED = "fixed"
 STRATEGY_STRUCTURAL = "structural"
 STRATEGIES = (STRATEGY_FIXED, STRATEGY_STRUCTURAL)
-SCHEMA_VERSION = "1"
+# Версия 2 добавила таблицу векторов: индекс прошлой версии не читается как пригодный — это
+# осознанная цена правила «индекс заменяется атомарно», и пересборка объявляется, а не
+# подразумевается.
+SCHEMA_VERSION = "2"
 
 # Причины пропуска файла — для отчёта: пользователь должен видеть, почему корпус меньше каталога.
 SKIP_EXTENSION = "расширение вне корпуса"
@@ -81,6 +91,9 @@ class IndexReport:
     source: str
     built_at: float
     skipped: Tuple[SkippedFile, ...] = ()
+    vector_model: str = ""
+    vectors: int = 0
+    vector_note: str = ""
 
     @property
     def built_at_text(self) -> str:
@@ -341,6 +354,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "sha1 TEXT NOT NULL, PRIMARY KEY(strategy, chunk_id))"
     )
     connection.execute("CREATE INDEX chunks_by_path ON chunks(strategy, path)")
+    # Вектор — свойство модели: ключ начинается с неё, иначе чужие векторы нашлись бы на месте
+    # своих и дали бы оценку без смысла.
+    connection.execute(
+        "CREATE TABLE chunk_vectors ("
+        "model TEXT NOT NULL, strategy TEXT NOT NULL, chunk_id TEXT NOT NULL, "
+        "dimensions INTEGER NOT NULL, vector TEXT NOT NULL, "
+        "PRIMARY KEY(model, strategy, chunk_id))"
+    )
+    connection.execute("CREATE INDEX chunk_vectors_by_model ON chunk_vectors(model, strategy)")
     connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -349,22 +371,91 @@ def _digest(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def _insert_vectors(
+    connection: sqlite3.Connection,
+    strategy: str,
+    chunks: Sequence[CodeChunk],
+    provider,
+) -> Tuple[str, int]:
+    """Считает и пишет векторы фрагментов внутри временной базы.
+
+    Векторы пишутся до замены файла: обрыв на середине оставил бы индекс с векторами у части
+    фрагментов, и поиск ранжировал бы по остатку, не отличая его от целого. Негодный вектор и
+    смена размерности посреди корпуса отменяют сборку — это признак сменившихся весов пресета,
+    а не повод записать несопоставимые числа.
+    """
+    rows: List[Tuple[str, str, str, int, str]] = []
+    dimensions = 0
+    for chunk in chunks:
+        try:
+            vector = provider.embed(chunk.text)
+        except embeddings.EmbeddingsError as error:
+            raise embeddings.EmbeddingsError(f"фрагмент {chunk.chunk_id}: {error}") from error
+        values = tuple(vector or ())
+        if not values or not all(
+            type(value) in (int, float) and math.isfinite(value) for value in values
+        ):
+            raise CodeIndexError(
+                f"негодный вектор фрагмента {chunk.chunk_id}: ожидались числа, "
+                f"получено {vector!r}"
+            )
+        if dimensions and len(values) != dimensions:
+            raise CodeIndexError(
+                f"размерность векторов изменилась на фрагменте {chunk.chunk_id}: "
+                f"{dimensions} и {len(values)} — модель сменилась под теми же весами"
+            )
+        dimensions = len(values)
+        rows.append(
+            (provider.model, strategy, chunk.chunk_id, dimensions, json.dumps([float(v) for v in values]))
+        )
+    connection.executemany(
+        "INSERT INTO chunk_vectors (model, strategy, chunk_id, dimensions, vector) "
+        "VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    return provider.model, len(rows)
+
+
+def _drop_temporary(path: Path) -> None:
+    """Убирает временный файл сборки: каталог на его месте оставлен как есть — его создал не сборщик."""
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def build_index(
     root: Path,
     corpus: DomainCorpus,
     strategy: str,
     database: Path,
+    provider=None,
 ) -> IndexReport:
     """Собирает индекс и заменяет прежний только при успехе.
 
     Прежний индекс остаётся нетронутым до последнего шага: сборка во временном файле и один
     `os.replace`. Ошибка обхода, разбора или записи оставляет пользователя с рабочим индексом,
     а не с полупустым — прежний ещё пригоден.
+
+    `provider` — векторная модель (`core/embeddings.py`): её векторы считаются внутри временной
+    базы, поэтому индекс не бывает полувекторизованным, а сбой модели отменяет сборку целиком.
+    Без аргумента берётся модель по умолчанию (`embeddings.code_provider`): локальный пресет,
+    когда сервер под управлением приложения. Если её нет — индекс собирается токенным, и причина
+    записывается в метаданные: поиск обязан показать её, а не выдать токенный результат за
+    векторный.
     """
     root = Path(root)
     database = Path(database)
     if strategy not in STRATEGIES:
         raise CodeIndexError(f"неизвестная стратегия разбиения: {strategy}")
+    if provider is None:
+        choice = embeddings.code_provider()
+        provider = choice.provider
+        vector_note = choice.reason
+    else:
+        vector_note = ""
     scan_result = scan(root, corpus)
     chunks: List[CodeChunk] = []
     skipped = list(scan_result.skipped)
@@ -380,6 +471,8 @@ def build_index(
     built_at = time.time()
     lines_total = sum(chunk.end_line - chunk.start_line + 1 for chunk in chunks)
     size_total = sum(len(chunk.text.encode("utf-8")) for chunk in chunks)
+    vector_model = ""
+    vectors_total = 0
     try:
         if temporary.exists():
             temporary.unlink()
@@ -402,6 +495,10 @@ def build_index(
                     for chunk in chunks
                 ],
             )
+            if provider is not None:
+                vector_model, vectors_total = _insert_vectors(
+                    connection, strategy, chunks, provider
+                )
             metadata = {
                 "schema": SCHEMA_VERSION,
                 "strategy": strategy,
@@ -412,6 +509,9 @@ def build_index(
                 "lines": str(lines_total),
                 "size_bytes": str(size_total),
                 "source": scan_result.source,
+                "vector_model": vector_model,
+                "vectors": str(vectors_total),
+                "vector_note": vector_note,
                 "skipped": json.dumps(
                     [{"path": item.path, "reason": item.reason} for item in skipped],
                     ensure_ascii=False,
@@ -424,13 +524,15 @@ def build_index(
         finally:
             connection.close()
         os.replace(temporary, database)
+    except embeddings.EmbeddingsError as error:
+        _drop_temporary(temporary)
+        raise CodeIndexError(f"индекс не собран: векторы не посчитаны: {error}") from error
     except (OSError, sqlite3.Error) as error:
-        if temporary.exists():
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+        _drop_temporary(temporary)
         raise CodeIndexError(f"индекс не собран: {error}") from error
+    except BaseException:
+        _drop_temporary(temporary)
+        raise
 
     return IndexReport(
         strategy=strategy,
@@ -443,6 +545,9 @@ def build_index(
         source=scan_result.source,
         built_at=built_at,
         skipped=tuple(skipped),
+        vector_model=vector_model,
+        vectors=vectors_total,
+        vector_note=vector_note,
     )
 
 
@@ -468,6 +573,14 @@ def index_exists(database: Path) -> bool:
         connection.close()
 
 
+def _metadata(connection: sqlite3.Connection) -> Dict[str, str]:
+    """Метаданные индекса или пустой словарь: битый файл — это пустой индекс, а не исключение."""
+    try:
+        return dict(connection.execute("SELECT key, value FROM metadata"))
+    except sqlite3.Error:
+        return {}
+
+
 def read_index(database: Path) -> Optional[IndexReport]:
     """Снимок прежней сборки — из метаданных индекса, без обращения к репозиторию."""
     database = Path(database)
@@ -478,9 +591,7 @@ def read_index(database: Path) -> Optional[IndexReport]:
     except sqlite3.Error:
         return None
     try:
-        rows = dict(connection.execute("SELECT key, value FROM metadata"))
-    except sqlite3.Error:
-        return None
+        rows = _metadata(connection)
     finally:
         connection.close()
     if rows.get("schema") != SCHEMA_VERSION:
@@ -504,15 +615,83 @@ def read_index(database: Path) -> Optional[IndexReport]:
         source=rows.get("source", ""),
         built_at=built_at,
         skipped=skipped,
+        vector_model=rows.get("vector_model", ""),
+        vectors=int(rows.get("vectors", "0")),
+        vector_note=rows.get("vector_note", ""),
     )
+
+
+def _metadata(connection: sqlite3.Connection) -> Dict[str, str]:
+    """Метаданные индекса или пустой словарь: битый файл — это пустой индекс, а не исключение."""
+    try:
+        return dict(connection.execute("SELECT key, value FROM metadata"))
+    except sqlite3.Error:
+        return {}
+
+
+@dataclass(frozen=True)
+class VectorSet:
+    """Векторы фрагментов одной модели: имя модели, векторы и причина, когда их нет.
+
+    Модель и причина едут вместе с векторами: поиск обязан назвать и то, чем считали, и то,
+    почему не считали, — иначе чужое пространство или отсутствие векторов останутся незамеченными.
+    """
+
+    model: str = ""
+    vectors: Dict[str, Tuple[float, ...]] = field(default_factory=dict)
+    note: str = ""
+
+
+def read_vectors(database: Path) -> VectorSet:
+    """Векторы фрагментов индекса: только чтение, без обращения к репозиторию.
+
+    Индекс прошлой версии схемы векторов не даёт: он не читается как пригодный, и это состояние
+    с причиной, а не пустой список без объяснения.
+    """
+    database = Path(database)
+    if not index_exists(database):
+        return VectorSet(note="индекса нет: соберите его командой /code index")
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    except sqlite3.Error as error:
+        return VectorSet(note=f"индекс не открывается: {error}")
+    try:
+        rows = _metadata(connection)
+        if rows.get("schema") != SCHEMA_VERSION:
+            return VectorSet(
+                note=(
+                    f"индекс собран версией схемы {rows.get('schema', 'неизвестной')}, "
+                    f"текущая — {SCHEMA_VERSION}: пересоберите индекс"
+                )
+            )
+        model = rows.get("vector_model", "")
+        note = rows.get("vector_note", "")
+        if not model:
+            return VectorSet(note=note or "индекс собран без векторов")
+        try:
+            stored = connection.execute(
+                "SELECT chunk_id, vector FROM chunk_vectors WHERE model = ?", (model,)
+            ).fetchall()
+        except sqlite3.Error as error:
+            return VectorSet(model=model, note=f"векторы не читаются: {error}")
+    finally:
+        connection.close()
+    vectors: Dict[str, Tuple[float, ...]] = {}
+    for chunk_id, payload in stored:
+        try:
+            values = tuple(float(value) for value in json.loads(payload))
+        except (TypeError, ValueError):
+            return VectorSet(model=model, note=f"вектор фрагмента {chunk_id} не разбирается")
+        vectors[str(chunk_id)] = values
+    return VectorSet(model=model, vectors=vectors, note=note)
 
 
 def read_chunks(database: Path) -> Tuple[CodeChunk, ...]:
     """Фрагменты из индекса — в порядке путей и строк: так поиск получает стабильный вход.
 
     Чтение только на чтение и без обращения к репозиторию: индекс самодостаточен, а тексты в нём
-    уже дословные. Битый или чужой файл — пустой результат, а не исключение: вызывающий решает,
-    что показать пользователю.
+    уже дословные. Битый, чужой или собранный прошлой версией схемы файл — пустой результат, а не
+    исключение: вызывающий решает, что показать пользователю.
     """
     database = Path(database)
     if not index_exists(database):
@@ -522,6 +701,8 @@ def read_chunks(database: Path) -> Tuple[CodeChunk, ...]:
     except sqlite3.Error:
         return ()
     try:
+        if _metadata(connection).get("schema") != SCHEMA_VERSION:
+            return ()
         rows = connection.execute(
             "SELECT strategy, chunk_id, path, start_line, end_line, content FROM chunks "
             "ORDER BY path, start_line"

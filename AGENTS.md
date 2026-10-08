@@ -300,8 +300,9 @@ openspec validate --all --strict                           # проверка с
 `--domain`). Состояние изолируется переменными `FFAI_*` — см. `.env.example`.
 
 Команды слоёв донора (перенесены без изменений): `/commands`, `/settings`, `/models`, `/branches`,
-`/context`, `/usage`, `/domain`, `/exit`; их поведение закреплено тестами, отдельные спецификации —
-открытая задача (заметка фазы P0).
+`/context`, `/usage`, `/domain`, `/exit`; их поведение описано спецификациями `answer-formats`,
+`settings-screen`, `model-selection`, `context-strategies`, `history-persistence`,
+`usage-accounting`, `terminal-ui`, `test-infrastructure`.
 Расписание: `/schedule` — снимок заданий и прогонов; задания выполняет `ff-ai-scheduler.py`
 (`--once` для одного прохода), а приложение объявляет о новых прогонах после ответа.
 Локальная модель: пресеты из `llama_server/models.ini`; автозапуск выключается `FFAI_LLAMA_AUTOSTART=0`

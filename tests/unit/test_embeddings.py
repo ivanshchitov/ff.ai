@@ -16,9 +16,11 @@ from core import config
 from core.embeddings import (
     EmbeddingsError,
     LocalEmbeddings,
+    code_provider,
     cosine,
     embeddings_url,
     for_model,
+    local_provider,
 )
 
 EMBEDDINGS_URL = "http://localhost:9999/v1/embeddings"
@@ -155,3 +157,53 @@ def test_cosine_refuses_mismatched_dimensions():
     assert cosine([1.0, 2.0], [1.0, 2.0]) == pytest.approx(5.0)
     with pytest.raises(EmbeddingsError, match="размерности"):
         cosine([1.0, 2.0], [1.0, 2.0, 3.0])
+
+
+# --- выбор векторной модели -----------------------------------------------------------------
+
+
+def test_default_provider_is_the_only_embedding_preset(monkeypatch):
+    """Векторная модель не зависит от чат-модели: это embedding-пресет и его адрес."""
+    monkeypatch.setattr(config, "LOCAL_API_URL", "http://localhost:1234/v1/chat/completions")
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["embed"])
+
+    choice = local_provider()
+
+    assert choice.available is True
+    assert choice.model == "embed"
+    assert choice.provider.url == "http://localhost:1234/v1/embeddings"
+    assert choice.reason == ""
+
+
+@pytest.mark.parametrize("names", [[], ["one", "two"]])
+def test_ambiguous_presets_are_a_named_reason(monkeypatch, names):
+    """Ноль и два пресета — названная причина, а не исключение: поиску есть чем ответить."""
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", names)
+
+    choice = local_provider()
+
+    assert choice.available is False
+    assert "embedding = true" in choice.reason or "embedding-пресетов" in choice.reason
+
+
+def test_code_provider_needs_a_managed_local_server(monkeypatch):
+    """Автозапуск выключен — приложение сервером не управляет, и векторы не считаются."""
+    monkeypatch.setenv("FFAI_LLAMA_AUTOSTART", "0")
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["embed"])
+
+    choice = code_provider()
+
+    assert choice.available is False
+    assert "FFAI_LLAMA_AUTOSTART" in choice.reason
+
+
+def test_code_provider_uses_the_preset_when_the_server_is_managed(monkeypatch):
+    """Автозапуск включён — сервер поднимает точка входа, и пресет становится моделью векторов."""
+    monkeypatch.setenv("FFAI_LLAMA_AUTOSTART", "1")
+    monkeypatch.setattr(config, "LOCAL_API_URL", "http://localhost:1234/v1/chat/completions")
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["embed"])
+
+    choice = code_provider()
+
+    assert choice.available is True
+    assert choice.model == "embed"

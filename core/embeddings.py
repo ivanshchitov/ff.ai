@@ -10,11 +10,12 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import requests
 
-from . import config
+from . import config, llama_server
 
 # Модель считает вектор фрагмента целиком: бюджет щедрый, потому что первый запрос ещё и
 # загружает веса в память сервера.
@@ -137,6 +138,73 @@ def for_model(chat_model: str, presets=None) -> Optional[LocalEmbeddings]:
         model=embedding_models[0],
         url=embeddings_url(config.api_url_for_model(chat_model)),
     )
+
+
+@dataclass(frozen=True)
+class EmbeddingChoice:
+    """Провайдер векторов и названная причина, когда его нет.
+
+    Пара «провайдер + причина» вместо голого `Optional`: вызывающий обязан показать причину.
+    Токенный поиск без векторов законен, а молчаливая подмена — нет, поэтому отсутствие модели
+    всегда приходит текстом, а не пустым значением.
+    """
+
+    provider: Optional[LocalEmbeddings] = None
+    reason: str = ""
+
+    @property
+    def available(self) -> bool:
+        return self.provider is not None
+
+    @property
+    def model(self) -> str:
+        return "" if self.provider is None else self.provider.model
+
+
+def local_provider(presets=None) -> EmbeddingChoice:
+    """Векторная модель по умолчанию: единственный embedding-пресет, независимо от чат-модели.
+
+    Векторы считает embedding-модель, а не выбранная чат-модель: иначе облачный чат требовал бы
+    облачных векторов, и режим без ключа терял бы поиск. Ноль пресетов и несколько — состояния
+    с причиной: выбирать модель за пользователя нельзя.
+    """
+    embedding_models = (
+        config.LOCAL_EMBEDDING_MODELS if presets is None else config.local_embedding_models(presets)
+    )
+    if not embedding_models:
+        return EmbeddingChoice(
+            reason="в llama_server/models.ini нет пресета с embedding = true"
+        )
+    if len(embedding_models) > 1:
+        return EmbeddingChoice(
+            reason=(
+                "в llama_server/models.ini несколько embedding-пресетов "
+                f"({', '.join(embedding_models)}): модель векторов не выбрана"
+            )
+        )
+    return EmbeddingChoice(
+        provider=LocalEmbeddings(
+            model=embedding_models[0], url=embeddings_url(config.LOCAL_API_URL)
+        )
+    )
+
+
+def code_provider(presets=None) -> EmbeddingChoice:
+    """Векторная модель для корпуса кода: локальный сервер должен быть под управлением приложения.
+
+    Локальный llama-server поднимает и убирает сама точка входа, и только при включённом
+    автозапуске (`core/llama_server.py`). При выключенном сервера может не быть вовсе: тогда
+    векторы не считаются, а причина возвращается текстом — иначе `/code index` падал бы там, где
+    достаточно токенного индекса, а поиск молча выдавал бы токенный результат за векторный.
+    """
+    if not llama_server.is_autostart_enabled():
+        return EmbeddingChoice(
+            reason=(
+                "автозапуск локального сервера выключен (FFAI_LLAMA_AUTOSTART): сервера может "
+                "не быть, векторы не считаются"
+            )
+        )
+    return local_provider(presets)
 
 
 def cosine(left: Sequence[float], right: Sequence[float]) -> float:

@@ -1,9 +1,16 @@
-"""Поиск по корпусу кода: локальные векторы фрагментов, две ступени отбора, снимок поиска.
+"""Поиск по корпусу кода: векторы фрагментов, две ступени отбора, снимок поиска.
 
-Поиск локальный: векторы считаются из текста фрагментов индекса и не требуют ни модели, ни сети.
-Две ступени повторяют отбор документации: `baseline` отдаёт первые результаты как есть, `enhanced`
+Первый этап — близость вопроса и фрагмента: по векторам, когда они есть в индексе для текущей
+векторной модели (тогда вопрос на русском находит английский код без переформулировки), иначе по
+совпадению токенов. Токенный путь остаётся явным режимом: он точнее на идентификаторах
+(`Q_PROPERTY`, `%files`), и выбирает способ пользователь, а не приложение за него. Способ, которым
+поиск шёл, и причина, по которой он пошёл другим, всегда в снимке: безвекторный результат не
+выдаётся за векторный.
+
+Вторая ступень повторяет отбор документации: `baseline` отдаёт первые результаты как есть, `enhanced`
 переформулирует вопрос, оценивает кандидатов моделью сессии и применяет порог. Различается только
-инструкция из ассетов — механизм оценки общий (`core/reranking.py`).
+инструкция из ассетов — механизм оценки общий (`core/reranking.py`). Переформулировка нужна там, где
+векторов нет: она была лекарством от несовпадения языков, а векторный поиск лечит причину.
 
 Приложение не выбрасывает сырые кандидаты: если оценка не удалась или все оценки ниже порога, это
 видимое состояние снимка, а не «сойдёт и так». Ответ по памяти в такой ситуации — ровно то, от чего
@@ -19,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import code_index, config, reranking
+from . import code_index, config, embeddings, reranking
 
 MODE_BASELINE = reranking.MODE_BASELINE
 MODE_ENHANCED = reranking.MODE_ENHANCED
@@ -34,6 +41,11 @@ STATUS_DISABLED = "disabled"
 
 CODE_QUERY_ASSET = "code_query_prompt.md"
 CODE_RERANK_ASSET = "code_rerank_prompt.md"
+
+# Способы ранжирования первого этапа: явный токенный режим и векторная близость.
+RANKING_TOKENS = "tokens"
+RANKING_VECTORS = "vectors"
+RANKINGS = (RANKING_TOKENS, RANKING_VECTORS)
 
 # Токены кода: слова, идентификаторы и числа. Идентификаторы дополнительно режутся по регистру и
 # подчёркиваниям — «ModelListLoader» должно находиться и по «model», и по «loader».
@@ -92,6 +104,9 @@ class CodeReport:
     rated: bool = False
     chunks: int = 0
     error: str = ""
+    # Способ ранжирования первого этапа и почему он такой: пусто — ранжирования не было.
+    ranking: str = ""
+    ranking_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -176,10 +191,40 @@ def _idf(documents: Sequence[Sequence[str]]) -> Dict[str, float]:
 class CodeRetriever:
     """Поиск по индексу: читает фрагменты, считает близость и применяет выбранную ступень."""
 
-    def __init__(self, database: Path, corpus=None, snippet_chars: int = None) -> None:
+    def __init__(
+        self,
+        database: Path,
+        corpus=None,
+        snippet_chars: int = None,
+        embedding=None,
+        ranking: str = None,
+    ) -> None:
+        """`embedding` — векторная модель; без неё берётся модель по умолчанию.
+
+        По умолчанию спрашивается `embeddings.code_provider`: тот же выбор, что и при сборке
+        индекса, — иначе поиск считал бы вектор вопроса моделью, которой нет в индексе.
+
+        `ranking` — способ ранжирования: `tokens`, `vectors` или None (векторы, когда они есть
+        в индексе, иначе токены с названной причиной). Явный режим нужен и пользователю (на
+        идентификаторах токены точнее), и проверке: смешение способов не должно быть незаметным.
+        """
         self.database = Path(database)
         self.corpus = corpus
         self._snippet_chars = snippet_chars
+        self._embedding = embedding
+        self._choice: Optional[embeddings.EmbeddingChoice] = None
+        self.ranking = ranking
+
+    @property
+    def embedding_choice(self) -> embeddings.EmbeddingChoice:
+        """Векторная модель и причина, если её нет: спрашивается один раз и запоминается."""
+        if self._choice is None:
+            self._choice = (
+                embeddings.EmbeddingChoice(provider=self._embedding)
+                if self._embedding is not None
+                else embeddings.code_provider()
+            )
+        return self._choice
 
     @property
     def snippet_chars(self) -> int:
@@ -194,14 +239,18 @@ class CodeRetriever:
         threshold: float = None,
         before: int = None,
         after: int = None,
+        ranking: str = None,
     ) -> CodeReport:
         """Ищет фрагменты по вопросу и возвращает снимок поиска.
 
         Вспомогательные обращения выполняет вызывающий: ретривер получает готовые функции
         `rewrite` (поисковый запрос) и `rate` (оценка кандидатов), поэтому локальный поиск
-        остаётся проверяемым без сети и без модели.
+        остаётся проверяемым без сети и без модели. Переформулировка не спрашивается, когда
+        первый этап идёт по векторам: вопрос на русском и английский код сближает сама модель,
+        и отдельный запрос за неё платить нечем.
         """
         mode = mode or config.CODE_RETRIEVAL_MODE
+        ranking = self.ranking if ranking is None else ranking
         threshold = config.CODE_RELEVANCE_THRESHOLD if threshold is None else threshold
         before = config.CODE_CANDIDATES_BEFORE if before is None else before
         after = config.CODE_FRAGMENTS_AFTER if after is None else after
@@ -220,6 +269,13 @@ class CodeRetriever:
                 error=f"неизвестный режим: {mode}",
                 **settings,
             )
+        if ranking is not None and ranking not in RANKINGS:
+            return CodeReport(
+                query=question,
+                status=STATUS_DISABLED,
+                error=f"неизвестный способ ранжирования: {ranking}",
+                **settings,
+            )
 
         chunks = code_index.read_chunks(self.database)
         if not chunks:
@@ -230,8 +286,26 @@ class CodeRetriever:
                 **settings,
             )
 
+        # Векторы спрашиваются у индекса один раз: и решение о переформулировке, и ранжирование
+        # идут по одному и тому же набору, иначе причина отказа разошлась бы с тем, чем искали.
+        want_vectors = ranking != RANKING_TOKENS
+        vector_set = code_index.read_vectors(self.database) if want_vectors else code_index.VectorSet()
+        choice = self.embedding_choice
+        vectors_ready, vectors_note = (
+            self._vector_readiness(chunks, vector_set, choice) if want_vectors else (False, "")
+        )
+        if want_vectors and not vectors_ready and ranking == RANKING_VECTORS:
+            # Строгий режим: молчаливая подмена векторов токенами — ровно то, чего просили не делать.
+            return CodeReport(
+                query=question,
+                status=STATUS_UNAVAILABLE,
+                error=vectors_note,
+                chunks=len(chunks),
+                **settings,
+            )
+
         query = question
-        if mode == MODE_ENHANCED:
+        if mode == MODE_ENHANCED and not vectors_ready:
             if rewrite is None:
                 return CodeReport(
                     query=query,
@@ -260,7 +334,21 @@ class CodeRetriever:
                 )
             query = rewritten
 
-        candidates = self._rank(query, chunks, before)
+        candidates: Optional[Tuple[CodeCandidate, ...]] = None
+        used_ranking = RANKING_TOKENS
+        ranking_note = vectors_note or "выбран явный токенный режим"
+        if vectors_ready:
+            candidates, vectors_note = self._vector_candidates(
+                query, chunks, before, vector_set, choice
+            )
+            if candidates is not None:
+                used_ranking = RANKING_VECTORS
+                ranking_note = f"векторная модель {vector_set.model}"
+        if candidates is None:
+            candidates = self._token_candidates(query, chunks, before)
+            ranking_note = vectors_note or ranking_note
+        settings["ranking"] = used_ranking
+        settings["ranking_note"] = ranking_note
         if not candidates:
             return CodeReport(
                 query=query, status=STATUS_NO_CANDIDATES, chunks=len(chunks), **settings
@@ -314,22 +402,88 @@ class CodeRetriever:
             **settings,
         )
 
-    def _rank(
+    def _vector_readiness(
+        self,
+        chunks: Sequence[code_index.CodeChunk],
+        vector_set: code_index.VectorSet,
+        choice: embeddings.EmbeddingChoice,
+    ) -> Tuple[bool, str]:
+        """Можно ли ранжировать векторами: (готовность, причина отказа).
+
+        Отказ — не исключение, а состояние с причиной: чужое пространство и неполный набор
+        векторов не дают оценки, которую можно было бы назвать близостью.
+        """
+        if not vector_set.model:
+            return False, vector_set.note or "в индексе нет векторов"
+        if not choice.available:
+            return False, (
+                f"векторы модели {vector_set.model} в индексе есть, но посчитать вектор вопроса "
+                f"нечем: {choice.reason}"
+            )
+        if choice.model != vector_set.model:
+            return False, (
+                f"в индексе векторы модели {vector_set.model}, доступная модель векторов — "
+                f"{choice.model}: чужое пространство не используется"
+            )
+        missing = [chunk.chunk_id for chunk in chunks if chunk.chunk_id not in vector_set.vectors]
+        if missing:
+            return False, (
+                f"векторы есть не у всех фрагментов: нет у {len(missing)} из {len(chunks)} — "
+                "пересоберите индекс"
+            )
+        return True, ""
+
+    def _vector_candidates(
+        self,
+        query: str,
+        chunks: Sequence[code_index.CodeChunk],
+        before: int,
+        vector_set: code_index.VectorSet,
+        choice: embeddings.EmbeddingChoice,
+    ) -> Tuple[Optional[Tuple[CodeCandidate, ...]], str]:
+        """Кандидаты по близости векторов: (None, причина), если векторами ранжировать нельзя.
+
+        Сбой модели на векторе вопроса — та же названная причина, а не повод выдать токенный
+        результат за векторный: способ ранжирования обязан быть виден в снимке.
+        """
+        try:
+            query_vector = choice.provider.embed_query(query)
+            scored = [
+                (
+                    embeddings.cosine(query_vector, vector_set.vectors[chunk.chunk_id]),
+                    chunk.chunk_id,
+                    chunk,
+                )
+                for chunk in chunks
+            ]
+        except embeddings.EmbeddingsError as error:
+            return None, f"вектор вопроса не посчитан: {error}"
+        return self._candidates_from(scored, before), ""
+
+    def _token_candidates(
         self, query: str, chunks: Sequence[code_index.CodeChunk], before: int
     ) -> Tuple[CodeCandidate, ...]:
-        """Кандидаты по близости: idf по корпусу, косинус по фрагментам, устойчивый порядок."""
+        """Кандидаты по совпадению токенов: idf по корпусу, косинус по фрагментам."""
         documents = [tokenize(chunk.text) for chunk in chunks]
         weights = _idf(documents)
         query_vector = _vector(tokenize(query), weights)
-        scored: List[Tuple[float, str, code_index.CodeChunk]] = []
-        for chunk, tokens in zip(chunks, documents):
-            score = cosine(query_vector, _vector(tokens))
-            scored.append((score, chunk.chunk_id, chunk))
-        # Фрагмент без единого общего токена с запросом — не кандидат: нулевая близость означает
-        # «ничего общего», и платить модели за оценку такого кандидата не за что.
-        scored = [item for item in scored if item[0] > 0.0]
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        return tuple(self._candidate(chunk, score) for score, _, chunk in scored[: max(1, before)])
+        scored = [
+            (cosine(query_vector, _vector(tokens)), chunk.chunk_id, chunk)
+            for chunk, tokens in zip(chunks, documents)
+        ]
+        return self._candidates_from(scored, before)
+
+    def _candidates_from(
+        self, scored: Sequence[Tuple[float, str, code_index.CodeChunk]], before: int
+    ) -> Tuple[CodeCandidate, ...]:
+        """Кандидаты по близости: нулевая близость означает «ничего общего», а порядок устойчив.
+
+        Правило одно для обоих способов: фрагмент без общей близости с запросом — не кандидат,
+        и платить модели за его оценку не за что.
+        """
+        ranked = [item for item in scored if item[0] > 0.0]
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return tuple(self._candidate(chunk, score) for score, _, chunk in ranked[: max(1, before)])
 
     def _candidate(self, chunk: code_index.CodeChunk, score: float) -> CodeCandidate:
         label = f"{chunk.path}:L{chunk.start_line}-L{chunk.end_line}"

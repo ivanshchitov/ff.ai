@@ -1454,6 +1454,8 @@ class AssistantSession:
             f"Поисковый запрос: {report.query}",
             settings,
             f"Индекс: {report.database}; фрагментов в индексе: {report.chunks}",
+            f"Ранжирование: {report.ranking or 'не выполнялось'}"
+            + (f" — {report.ranking_note}" if report.ranking_note else ""),
             f"Состояние: {report.status}"
             + (f" ({report.error})" if report.error else ""),
             f"Кандидатов: {len(report.candidates)}"
