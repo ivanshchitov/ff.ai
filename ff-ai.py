@@ -15,25 +15,24 @@ import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-VENV_PYTHON = BASE_DIR / ".venv" / "bin" / "python"
+VENV_DIR = BASE_DIR / ".venv"
+VENV_PYTHON = VENV_DIR / "bin" / "python"
+
+# Запуск «как есть» (./ff-ai.py) идёт через `env python3`, то есть интерпретатором системы: у него
+# нет зависимостей проекта, и первый же импорт из `core` падает. Поэтому перезапускаем себя
+# интерпретатором окружения — до любых импортов проекта, иначе перезапуск не успевает случиться.
+# Признак «мы уже внутри окружения» — `sys.prefix`, а не путь исполняемого файла: `.venv/bin/python`
+# сам по себе симлинк на базовый интерпретатор, и сравнение разрешённых путей считало бы запуск
+# системным интерпретатором запуском изнутри окружения, поэтому перезапуск не срабатывал.
+if (
+    VENV_PYTHON.exists()
+    and Path(sys.prefix) != VENV_DIR
+    and os.environ.get("FFAI_NO_REEXEC") != "1"
+):
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 __version__ = "0.1"
 # Сигналы, по которым сервер нужно убрать за собой: SIGKILL не перехватывается, это граница.
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-
-
-def _reexec_in_venv() -> None:
-    """Перезапускает процесс интерпретатором проекта, если он лежит рядом с точкой входа."""
-    if os.environ.get("FFAI_NO_REEXEC") == "1" or not VENV_PYTHON.exists():
-        return
-    try:
-        current = Path(sys.executable).resolve()
-    except OSError:  # pragma: no cover - экзотическая платформа
-        return
-    if current == VENV_PYTHON.resolve():
-        return
-    os.execv(
-        str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]]
-    )
 
 
 def parse_args(argv) -> argparse.Namespace:
@@ -107,8 +106,6 @@ def main(argv=None) -> int:
     if args.version:
         print(f"ff.ai {__version__}")
         return 0
-
-    _reexec_in_venv()
 
     from core.domains import DomainError
     from core.repo import RepoRootError, resolve_root
