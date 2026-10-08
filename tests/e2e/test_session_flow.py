@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from core import config
+
 from .harness import AppSession
 from .stub_api import StubAPI, answer
 
@@ -47,7 +49,8 @@ def test_request_carries_the_domain_role_and_the_configured_limits(app, stub):
     assert "Qt 5.6" in system
     assert "вне области" in system  # правила отказа из пакета домена
     user = stub.user_messages()[0]
-    assert "не более 200 слов" in user
+    # Объём по умолчанию — максимум диапазона, поэтому проверяется он, а не прежние 200.
+    assert f"не более {config.DEFAULT_MAX_WORDS} слов" in user
     assert "не более 3 вариантов" in user
 
 
