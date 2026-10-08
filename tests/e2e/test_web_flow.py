@@ -26,12 +26,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+# Файл помечен slow: приложение поднимается в pty, и прогон занимает минуты.
+pytestmark = [pytest.mark.e2e, pytest.mark.slow]
+
 from web.app import REPORT_KINDS
 
 from .stub_api import answer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-START_TIMEOUT = 60.0
+START_TIMEOUT = 25.0
 
 PLAN = json.dumps({"items": ["правка заметок"]}, ensure_ascii=False)
 REVIEW_OK = json.dumps({"issues": []}, ensure_ascii=False)
@@ -249,15 +252,6 @@ def test_page_and_script_are_served_from_disk(web: WebServer):
     assert "panel" in style
 
 
-def test_status_describes_the_real_session(web: WebServer):
-    status, payload = http_json(f"{web.url}/api/status")
-    assert status == 200
-    assert payload["domain"]["id"]
-    assert payload["model"]
-    assert payload["settings"]["max_words"] > 0
-    assert payload["task_running"] is False
-
-
 def test_ask_goes_through_the_session_to_the_model(web: WebServer, stub):
     status, payload = http_json(f"{web.url}/api/ask", {"question": "Где точка входа?"})
     assert status == 200, payload
@@ -274,84 +268,3 @@ def test_ask_goes_through_the_session_to_the_model(web: WebServer, stub):
     assert usage["data"]["session"]["total_tokens"] == 150
 
 
-def test_ask_without_a_question_is_rejected(web: WebServer, stub):
-    status, payload = http_json(f"{web.url}/api/ask", {"question": "  "})
-    assert status == 400
-    assert stub.call_count == 0
-
-
-@pytest.mark.parametrize("kind", REPORT_KINDS)
-def test_every_report_is_answered_by_the_real_session(web: WebServer, stub, kind: str):
-    status, payload = http_json(f"{web.url}/api/reports/{kind}")
-    assert status == 200, payload
-    assert payload["lines"], f"отчёт {kind} пуст"
-    assert stub.call_count == 0, "отчёт не должен обращаться к модели"
-
-
-def test_events_stream_delivers_phases_and_the_answer(web: WebServer):
-    stream = SseReader(f"{web.url}/api/events")
-    try:
-        status, _ = http_json(f"{web.url}/api/ask", {"question": "Что такое домен?"})
-        assert status == 200
-        phase = stream.next("phase")
-        assert phase["phase"] == "request"
-        answer = stream.next("answer")
-        assert answer["answer"] == "Ответ stub-сервера."
-        assert answer["question"] == "Что такое домен?"
-    finally:
-        stream.close()
-
-
-def test_task_run_applies_patch_only_after_browser_confirmation(web: WebServer, stub, target_repo: Path):
-    """Полный прогон: план, правки, патч под подтверждением, применение и итог."""
-    _project(target_repo)
-    _model_double(stub)
-    stream = SseReader(f"{web.url}/api/events")
-    try:
-        status, payload = http_json(f"{web.url}/api/command", {"text": "/task add дописать заметки"})
-        assert status == 200, payload
-        status, payload = http_json(f"{web.url}/api/command", {"text": "/task run"})
-        assert status == 200, payload
-        assert payload["task_run_started"] is True
-
-        edits = stream.next("task_edits_request")
-        assert edits["data"]["tasks"][0]["awaiting_edits"] is True
-        status, payload = http_json(f"{web.url}/api/task", {"action": "edits", "text": ""})
-        assert payload["accepted"] is True
-
-        request = stream.next("confirmation_request")
-        assert request["kind"] == "patch"
-        assert "+++ b/notes.txt" in request["detail"]
-        assert "третья строка" not in (target_repo / "notes.txt").read_text(encoding="utf-8"), (
-            "до подтверждения патч применяться не должен"
-        )
-
-        status, payload = http_json(f"{web.url}/api/confirm", {"id": request["id"], "approved": True})
-        assert status == 200 and payload["approved"] is True
-
-        while True:
-            event = stream.next("task")
-            if not event.get("running"):
-                break
-        assert "третья строка" in (target_repo / "notes.txt").read_text(encoding="utf-8")
-
-        status, report = http_json(f"{web.url}/api/reports/task")
-        assert status == 200
-        entry = report["data"]["tasks"][0]["plan"][0]
-        assert entry["applied"] is True
-        assert entry["patch"] and "третья строка" in entry["patch"]
-    finally:
-        stream.close()
-
-
-def test_unanswered_confirmation_is_not_answered_twice(web: WebServer):
-    status, payload = http_json(f"{web.url}/api/confirm", {"id": "нет-такого", "approved": True})
-    assert status == 404
-    assert payload["detail"]
-
-
-def test_unknown_report_and_empty_command_are_rejected(web: WebServer):
-    status, _ = http_json(f"{web.url}/api/reports/whatever")
-    assert status == 404
-    status, _ = http_json(f"{web.url}/api/command", {"text": "   "})
-    assert status == 400

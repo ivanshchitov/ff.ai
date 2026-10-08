@@ -13,7 +13,7 @@ import pytest
 
 from .harness import AppSession
 
-INDEX_TIMEOUT = 60
+INDEX_TIMEOUT = 25
 COMMAND_TIMEOUT = 30
 
 

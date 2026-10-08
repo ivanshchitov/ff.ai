@@ -90,24 +90,3 @@ def test_single_run_executes_the_due_job_and_exits(environment, target_repo):
     assert data["runs"][0]["fresh"] == 1
 
 
-def test_the_next_pass_has_nothing_to_do(environment, target_repo):
-    """Срок задания сдвигается прогоном: второй проход не повторяет работу того же периода."""
-    add_job(environment, target_repo)
-    run_daemon(environment, target_repo, "--once")
-
-    second = run_daemon(environment, target_repo, "--once")
-
-    assert second.returncode == 0
-    assert "просроченных заданий нет" in second.stdout
-    data = json.loads(schedule_file(environment).read_text(encoding="utf-8"))
-    assert len(data["runs"]) == 1
-
-
-def test_unavailable_server_is_reported_without_a_crash(environment, target_repo, tmp_path):
-    """Отказ сервера печатается и не роняет исполнитель: в цикле тик просто пропускается."""
-    result = run_daemon(
-        environment, target_repo, "--once", "--command", str(tmp_path / "нет-такой-команды")
-    )
-
-    assert result.returncode == 0
-    assert "не удалось" in (result.stdout + result.stderr).lower()

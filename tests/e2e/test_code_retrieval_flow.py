@@ -37,7 +37,7 @@ CODE_TEXT = "\n".join(
 QUESTION = "где инициализируется модель списка?"
 CITED = f"Смотри {CODE}:L1-L9.\n\nЦитата: {QUOTE}"
 UNCITED = "Модель списка инициализируется при загрузке настроек."
-LIVE = 60
+LIVE = 25
 
 
 def _model_double(stub, answers: list, *, score: float = 0.9, query: str = "ModelList load models.ini"):

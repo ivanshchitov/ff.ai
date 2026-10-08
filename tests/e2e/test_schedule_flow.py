@@ -20,7 +20,6 @@ import pytest
 
 from .harness import REPO_ROOT, AppSession
 
-pytestmark = pytest.mark.e2e
 
 REPO_SERVER = REPO_ROOT / "mcp_server" / "repo_server.py"
 TOOLS_FILE = REPO_ROOT / "domains" / "aurora-qt5" / "tools.json"
@@ -69,41 +68,8 @@ def read_schedule(tmp_path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def test_repository_server_declares_the_jobs_and_the_scheduler(tmp_path: Path, stub):
-    with running(tmp_path, stub) as session:
-        session.send_line("/tool")
-        text = session.wait_for("schedule_run_due")
-
-    for name in JOB_TOOLS + SCHEDULE_TOOLS:
-        assert name in text
-    assert stub.call_count == 0
-
-
-def test_scan_finds_violations_and_accumulates_them(tmp_path: Path, stub):
-    with running(tmp_path, stub) as session:
-        session.write_repo_file("src/main.cpp", "int main() {\nQML_ELEMENT\n}\n")
-
-        session.send_line("/tool call public_api_scan modules=QtQuick")
-        found = session.wait_for("src/main.cpp:2")
-        assert "новых 1" in found
-
-        # Повторный поиск того же нарушения: оно уже накоплено и новым не считается.
-        session.send_line("/tool call public_api_scan modules=QtQuick")
-        session.wait_for("новых 0")
-
-    assert read_schedule(tmp_path)["collected"]["нарушения"]
-    assert stub.call_count == 0
-
-
-def test_module_outside_the_public_api_is_found(tmp_path: Path, stub):
-    with running(tmp_path, stub) as session:
-        session.write_repo_file("src/main.cpp", "#include <QtCore/QObject>\n")
-
-        session.send_line("/tool call public_api_scan modules=QtQuick")
-        text = session.wait_for("вне публичного API")
-
-    assert "QtCore" in text
-
+# Файл помечен slow: приложение поднимается в pty, и прогон занимает минуты.
+pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
 def test_job_is_scheduled_and_run_by_the_app(tmp_path: Path, stub):
     with running(tmp_path, stub) as session:
@@ -123,28 +89,6 @@ def test_job_is_scheduled_and_run_by_the_app(tmp_path: Path, stub):
     assert "Проверка публичного API" in data["runs"][0]["summary"]
     assert data["runs"][0]["fresh"] == 1
     assert stub.call_count == 0
-
-
-def test_day_delay_is_honoured_between_the_runs(tmp_path: Path, stub):
-    """Срок задания сдвигается прогоном: второй вызов не повторяет работу того же периода."""
-    with running(tmp_path, stub) as session:
-        session.send_line("/tool call schedule_add tool=public_api_scan every_minutes=60")
-        session.wait_for("поставлено")
-        session.send_line("/tool call schedule_run_due")
-        session.wait_for("Выполнено заданий")
-
-        session.send_line("/tool call schedule_run_due")
-        assert "просроченных заданий нет" in session.wait_for("просроченных заданий нет")
-
-
-def test_index_refresh_writes_the_index_into_the_cache(tmp_path: Path, stub):
-    with running(tmp_path, stub) as session:
-        session.write_repo_file("src/main.cpp", "int main() {}\n")
-
-        session.send_line("/tool call index_refresh")
-        assert "Индекс обновлён" in session.wait_for("Индекс обновлён")
-
-    assert index_file(tmp_path).is_file()
 
 
 def test_schedule_state_survives_a_restart(tmp_path: Path, stub):

@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import subprocess
 from pathlib import Path
 
 import pytest
+
+# Файл помечен slow: приложение поднимается в pty, и прогон занимает минуты.
+pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
 from .harness import AppSession
 from .stub_api import answer
@@ -44,7 +48,7 @@ BAD_PATCH = """```diff
 @@ -0,0 +1,1 @@
 +#include <QtWidgets/QApplication>
 +```"""
-LIVE = 60
+LIVE = 30
 
 
 # Задержка ответов: с мгновенными ответами прогон заканчивается быстрее, чем тест успевает
@@ -107,16 +111,42 @@ def _launch(tmp_path: Path, stub, **kwargs) -> AppSession:
     )
 
 
-def _answer_plan(app: AppSession) -> None:
-    """Отвечает на вопрос о правках плана пустой строкой: план утверждается."""
-    app.wait_for("Правки к плану", timeout=LIVE)
+def _wait_for_count(app: AppSession, needle: str, count: int, timeout: float = LIVE) -> None:
+    """Ждёт, пока подстрока встретится `count` раз.
+
+    `wait_for` ищет в скроллбэке и потому срабатывает на подсказке *первого* вопроса: панель
+    прогона рисуется заново, и отправленный сразу Enter попадает в промежуток между операциями,
+    где пустая строка игнорируется. Поэтому ждём именно новое появление.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if app.scrollback().count(needle) >= count:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"Не дождались {count}-го появления {needle!r} за {timeout} с.")
+
+
+def _answer_plan(app: AppSession, attempt: int = 1) -> None:
+    """Отвечает на вопрос о правках плана пустой строкой: план утверждается.
+
+    Считаем печатную строку вопроса, а не текст панели: панель перерисовывается в одном и том же
+    месте экрана, и повторных вхождений в скроллбэке не появляется.
+    """
+    _wait_for_count(app, "План построен. Правки", attempt)
+    time.sleep(0.4)  # панель успевает перейти к чтению ввода после перерисовки
     app.send_line("")
     app.wait_for("Пауза — клавиша p или Ctrl+C", timeout=LIVE)
 
 
-def _approve_patch(app: AppSession) -> None:
-    """Ждёт вопроса о применении патча и отвечает «да»: запись требует подтверждения."""
-    app.wait_for("Применить патч?", timeout=LIVE)
+def _approve_patch(app: AppSession, attempt: int = 1) -> None:
+    """Ждёт вопроса о применении патча и отвечает «да»: запись требует подтверждения.
+
+    Вопрос нумеруется по счётчику: подсказка от предыдущего патча остаётся в скроллбэке, и
+    `wait_for` на ней срабатывает сразу — а «y», отправленное в промежуток между операциями
+    прогона, пропадает (пустая строка там игнорируется).
+    """
+    _wait_for_count(app, "Применить патч?", attempt)
+    time.sleep(0.4)
     app.send_key(b"y")
 
 
@@ -155,7 +185,7 @@ def test_full_run_applies_patches_and_writes_the_report(app_with_task):
     _answer_plan(app)
     _approve_patch(app)
     app.wait_for("Патч применён", timeout=LIVE)
-    _approve_patch(app)
+    _approve_patch(app, attempt=2)
     app.wait_for("Задача 1: Завершено", timeout=LIVE)
 
     repo = app.repo
@@ -194,7 +224,7 @@ def test_edits_rebuild_the_plan(app_with_task):
     app.send_line("добавь экран")
     # Вопрос о плане задаётся снова, и пустой ответ утверждает уже перестроенный план; запрос
     # патча появляется только после этого — по нему и видно, что план строился дважды.
-    _answer_plan(app)
+    _answer_plan(app, attempt=2)
     _approve_patch(app)
 
     assert _phases(stub)[:2] == ["plan", "plan"], "правки перестраивают план вторым запросом"
@@ -238,7 +268,7 @@ def test_pause_and_resume(stub, tmp_path: Path):
 
         app.send_line("/task run")
         app.wait_for("Пауза — клавиша p или Ctrl+C", timeout=LIVE)
-        _approve_patch(app)
+        _approve_patch(app, attempt=2)
         app.wait_for("Патч применён", timeout=LIVE)
     finally:
         app.close()

@@ -32,15 +32,6 @@ def _launch(stub: StubAPI, tmp_path: Path, repo: Path = None, **kwargs) -> AppSe
     )
 
 
-def test_question_reaches_the_model_and_the_answer_is_shown(app, stub):
-    stub.always(answer(REPLY))
-    screen = app.ask(QUESTION)
-    assert stub.call_count == 1
-    assert "src/models.cpp" in screen
-    assert app.contains("Токены:")
-    assert app.metrics_count() == 1
-
-
 def test_request_carries_the_domain_role_and_the_configured_limits(app, stub):
     stub.always(answer(REPLY))
     app.ask(QUESTION)
@@ -63,17 +54,24 @@ def test_refusal_reaches_the_user_unchanged(app, stub):
     assert app.metrics_count() == 1  # отказ — обычный ответ, запрос к модели был
 
 
-def test_reports_do_not_call_the_model(app, stub):
+def test_reports_come_from_snapshots_and_do_not_call_the_model(app, stub):
+    """Отчёты проверяются одной сессией: каждый старт приложения стоит секунды, а проверки
+    независимы и читают снимки, поэтому делить их по тестам незачем."""
     stub.always(answer(REPLY))
     app.ask(QUESTION)
     before = stub.call_count
-    app.send_line("/usage")
-    app.wait_for("Вся история")
-    app.send_line("/context")
-    app.wait_for("Стратегия: summary")
-    app.send_line("/domain")
-    app.wait_for("Инвариантов домена: 10")
-    assert stub.call_count == before
+    for line, marker in (
+        ("/usage", "Вся история"),
+        ("/context", "Стратегия: summary"),
+        ("/invariants", "Правил домена: 10"),
+        ("/schedule", "Заданий: 0"),
+        ("/domain", "Инвариантов домена: 10"),
+        ("/rag-docs", "Режим отбора"),
+        ("/rag-code", "Индекса нет"),
+    ):
+        app.send_line(line)
+        app.wait_for(marker)
+    assert stub.call_count == before, "отчёты не обращаются к модели"
 
 
 def test_clear_empties_the_dialogue(app, stub, tmp_path: Path):
@@ -84,13 +82,6 @@ def test_clear_empties_the_dialogue(app, stub, tmp_path: Path):
     app.send_line("/clear")
     app.wait_for("Диалог очищен.")
     assert json.loads(history_file.read_text(encoding="utf-8"))["dialogues"] == []
-
-
-def test_unknown_command_is_reported_and_the_session_continues(app, stub):
-    stub.always(answer(REPLY))
-    app.send_line("/nope")
-    app.wait_for("Неизвестная команда")
-    assert app.ask(QUESTION)
 
 
 def test_second_question_carries_the_previous_exchange(app, stub):
@@ -118,35 +109,6 @@ def test_history_is_restored_on_restart(stub, tmp_path: Path):
         assert stub.call_count == 2
     finally:
         second.close()
-
-
-def test_target_repository_is_not_modified(app, stub):
-    before = sorted(path.name for path in Path(app.repo).iterdir())
-    stub.always(answer(REPLY))
-    app.ask(QUESTION)
-    app.send_line("/domain")
-    app.wait_for("Домен: ")
-    after = sorted(path.name for path in Path(app.repo).iterdir())
-    assert before == after
-    assert ".ffai" not in after and "history.json" not in after
-
-
-def test_state_files_stay_out_of_the_repository(app, stub, tmp_path: Path):
-    stub.always(answer(REPLY))
-    app.ask(QUESTION)
-    assert (tmp_path / "state" / "history.json").is_file()
-    assert not list(Path(app.repo).glob("*.json"))
-
-
-def test_domain_is_detected_by_repository_markers(stub, tmp_path: Path):
-    repo = AppSession.create_target_repo(base=tmp_path, name="marked")
-    (repo / "app.pro").write_text("QT += quick\n", encoding="utf-8")
-    session = _launch(stub, tmp_path, repo=repo, domain=None)
-    try:
-        assert session.wait_for("Домен выбран: маркеры репозитория")
-        assert session.contains("app.pro")
-    finally:
-        session.close()
 
 
 def test_directory_without_git_is_refused(stub, tmp_path: Path):

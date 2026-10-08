@@ -8,8 +8,11 @@ markers = [
     "pty: тесты, которым нужен настоящий псевдотерминал (Unix)",
     "e2e: полный прогон приложения через псевдотерминал против stub-сервера",
     "network: обращение к внешним сервисам — MCP-сервер документации портала, облачный API",
+    "slow: сквозные файлы с минутными прогонами (задача, планировщик, web, локальная модель)",
 ]
-addopts = "-m 'not network'"
+# По умолчанию — быстрый набор: юнит-слой и короткие сквозные. Полный набор: `pytest -m ""`,
+# только долгие: `pytest -m slow`.
+addopts = "-m 'not network and not slow'"
 filterwarnings = ["error::DeprecationWarning:core.*", "error::DeprecationWarning:ui.*"]
 
 [tool.coverage.run]

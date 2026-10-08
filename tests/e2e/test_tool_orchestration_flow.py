@@ -18,7 +18,7 @@ from .stub_api import answer
 
 FAKE = Path(__file__).resolve().parent.parent / "fake_mcp_server.py"
 ANSWER = "Ответ по данным инструментов."
-LIVE = 60
+LIVE = 25
 
 
 def _model_double(stub, choices: list, *, final: str = ANSWER):

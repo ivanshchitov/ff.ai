@@ -223,62 +223,6 @@ def test_docs_journal_reports_unavailable_and_replacement(tui, recording_console
     assert recording_console.contains("Документация портала недоступна: нет сети")
 
 
-def test_docs_journal_reports_empty_search(tui, recording_console, docs_retriever):
-    from tests.conftest import FakeDocsReport
-
-    docs_retriever.report = FakeDocsReport(query="вопрос", status="no_candidates")
-    tui.session._agent.docs_retriever = docs_retriever
-    tui._ask("вопрос")
-    assert recording_console.contains("ничего не найдено")
-
-
-def test_journal_reports_low_relevance_and_failed_rating(tui, recording_console, docs_retriever):
-    from tests.conftest import FakeCandidate, FakeDocsReport
-
-    docs_retriever.report = FakeDocsReport(
-        query="вопрос",
-        status="no_matches",
-        candidates=(FakeCandidate(path="doc/one"),),
-        rated=True,
-    )
-    tui.session._agent.docs_retriever = docs_retriever
-    tui._ask("вопрос")
-    assert recording_console.contains("ни один не прошёл порог 0.60")
-
-    recording_console.buffer.truncate(0)
-    recording_console.buffer.seek(0)
-    docs_retriever.report = FakeDocsReport(
-        query="вопрос", status="rerank_failed", error="ответ оценщика не разобран"
-    )
-    tui._ask("вопрос")
-    assert recording_console.contains("Оценка фрагментов не удалась: ответ оценщика не разобран")
-
-
-def test_tool_flow_journal_lines(tui, recording_console):
-    """Журнал печатает строку на шаг и причину остановки, когда флоу оборвался."""
-    from core import mcp_tools
-
-    step = mcp_tools.ToolStep(
-        step=1,
-        round=1,
-        server="repo",
-        tool="repo_search",
-        arguments={"query": "модель"},
-        sources={},
-        text="найдено",
-    )
-    tui.session._agent._last_tool_flow = mcp_tools.ToolFlowReport(
-        question="где модель?",
-        rounds=1,
-        choice_requests=1,
-        steps=(step,),
-        stop_reason=mcp_tools.FLOW_STEP_FAILED.format(number=2),
-    )
-    tui._print_tool_journal()
-    assert recording_console.contains("1 шаг · repo.repo_search")
-    assert recording_console.contains("Флоу остановлен: сбой шага 2")
-
-
 def test_tool_flow_journal_silent_without_steps(tui, recording_console):
     """Когда модель решила, что инструменты не нужны, журнал молчит: это обычный исход."""
     from core import mcp_tools

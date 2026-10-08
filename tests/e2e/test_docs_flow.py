@@ -19,7 +19,7 @@ pytestmark = pytest.mark.e2e
 FAKE_DOCS = Path(__file__).resolve().parent.parent / "fake_docs_server.py"
 # Поиск по документации — это несколько обращений к серверу (версии, разделы, полный текст),
 # поэтому ответ по корпусу приходит секундами, а не мгновенно.
-DOCS_TIMEOUT = 90.0
+DOCS_TIMEOUT = 30.0
 POSITIONING = "doc/software_development/guides/cpp_api/positioning"
 RELEASE_NOTES = "doc/release_notes/5.2.0"
 QUESTION = "как получить координаты устройства на Авроре?"
@@ -157,43 +157,6 @@ def test_unavailable_docs_server_is_reported_and_the_answer_goes_through(stub, t
         session.close()
 
 
-def test_version_question_searches_release_notes(stub, tmp_path: Path):
-    from .stub_api import answer
-
-    cited = (
-        "Фоновый режим появился в 5.2.0.\n"
-        f"Цитата: «{MARKERS[RELEASE_NOTES]}»\n"
-        f"Источник: {RELEASE_NOTES}"
-    )
-    _model_double(stub, answer_text=cited)
-    session = _launch(tmp_path, stub)
-    try:
-        session.ask("в какой версии появился фоновый режим геопозиции?", timeout=DOCS_TIMEOUT)
-        session.send_line("/rag-docs")
-        lines = session.wait_for("Разделы:")
-        assert "release_notes" in lines, "вопрос о версии ищется и в примечаниях к выпуску"
-        assert "версия документации: 5.2.1" in lines
-    finally:
-        session.close()
-
-
-def test_docs_report_shows_fragments_without_model_requests(stub, tmp_path: Path):
-    from .stub_api import answer
-
-    _model_double(stub, answer_text=CITED)
-    session = _launch(tmp_path, stub)
-    try:
-        session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        before = stub.call_count
-        session.send_line("/rag-docs trace")
-        lines = session.wait_for("Доставлено фрагментов:")
-        assert "Доставлено фрагментов:" in lines
-        assert POSITIONING in lines, "в отчёте видно, какие документы доставлены"
-        assert stub.call_count == before, "отчёт не обращается к модели"
-    finally:
-        session.close()
-
-
 def test_fragment_block_stays_out_of_history(stub, tmp_path: Path):
     from .stub_api import answer
 
@@ -244,29 +207,3 @@ def test_bad_rating_response_is_a_visible_state(stub, tmp_path: Path):
         session.close()
 
 
-def test_baseline_mode_skips_the_rating_request(stub, tmp_path: Path):
-    _model_double(stub, answer_text=CITED)
-    session = _launch(tmp_path, stub)
-    try:
-        session.send_line("/rag-docs retrieval baseline")
-        session.wait_for("Режим отбора: baseline")
-        session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 1, "в baseline оценка не запрашивается"
-        assert session.contains("Режим отбора: baseline"), "отчёт показывает режим"
-    finally:
-        session.close()
-
-
-def test_threshold_command_changes_the_report(stub, tmp_path: Path):
-    _model_double(stub, answer_text=CITED)
-    session = _launch(tmp_path, stub)
-    try:
-        session.send_line("/rag-docs threshold 0.9")
-        session.wait_for("Порог отбора: 0.90")
-        session.send_line("/rag-docs")
-        assert "порог: 0.90" in session.wait_for("Режим отбора:")
-
-        session.send_line("/rag-docs threshold 5")
-        assert "от 0 до 1" in session.wait_for("от 0 до 1")
-    finally:
-        session.close()

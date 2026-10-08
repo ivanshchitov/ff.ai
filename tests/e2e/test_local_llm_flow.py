@@ -16,6 +16,9 @@ from pathlib import Path
 
 import pytest
 
+# Файл помечен slow: приложение поднимается в pty, и прогон занимает минуты.
+pytestmark = [pytest.mark.e2e, pytest.mark.slow]
+
 from core import config
 
 from .harness import AppSession
