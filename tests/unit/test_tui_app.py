@@ -118,11 +118,14 @@ def test_question_is_not_sent_without_a_key(tui, recording_console, monkeypatch,
 
 
 def test_status_bar_shows_session_state(tui, recording_console):
+    """Строка состояния: модель, домен, проект и ветка — и ничего про формат и объём."""
     tui._print_status_bar()
     assert recording_console.contains("Модель: deepseek-v4.1-flash")
     assert recording_console.contains("Домен: aurora-qt5")
-    assert recording_console.contains("Формат: свободный")
-    assert recording_console.contains("Стратегия: резюме")
+    assert recording_console.contains("Проект: ")
+    assert not recording_console.contains("Формат:"), "формат живёт на экране /settings"
+    assert not recording_console.contains("Стратегия:"), "стратегия живёт в /context"
+    assert not recording_console.contains("Объём:"), "объём ответа в статусе не показывается"
 
 
 def test_welcome_panel_names_the_domain_and_the_root(tui, recording_console):

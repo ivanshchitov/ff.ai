@@ -109,7 +109,11 @@ def test_format_arrows_ignored_on_numeric_rows(state):
 
 def test_digits_append_to_the_selected_field(state):
     result = at_row(
-        state, settings_screen.ROW_MAX_WORDS, keyboard.BACKSPACE, keyboard.BACKSPACE, keyboard.BACKSPACE, "5", "0"
+        state,
+        settings_screen.ROW_MAX_WORDS,
+        *[keyboard.BACKSPACE] * len(str(config.DEFAULT_MAX_WORDS)),
+        "5",
+        "0",
     )
     assert result.max_words_input == "50"
     assert result.list_limit_input == str(config.DEFAULT_LIST_LIMIT)
@@ -158,9 +162,7 @@ def test_temperature_row_edits_independently(state):
     result = at_row(
         state,
         settings_screen.ROW_TEMPERATURE,
-        keyboard.BACKSPACE,
-        keyboard.BACKSPACE,
-        keyboard.BACKSPACE,
+        *[keyboard.BACKSPACE] * len(str(config.DEFAULT_MAX_WORDS)),
         "1",
         ".",
         "2",
@@ -213,7 +215,7 @@ def test_valid_input_is_applied():
     state = at_row(
         press(settings_screen.initial_state(AnswerSettings()), keyboard.RIGHT),
         settings_screen.ROW_MAX_WORDS,
-        *[keyboard.BACKSPACE] * 3,
+        *[keyboard.BACKSPACE] * len(str(config.DEFAULT_MAX_WORDS)),
         "5",
         "0",
     )
@@ -373,7 +375,7 @@ def test_bad_temperature_does_not_block_other_fields():
     state = at_row(
         settings_screen.initial_state(original),
         settings_screen.ROW_MAX_WORDS,
-        *[keyboard.BACKSPACE] * 3,
+        *[keyboard.BACKSPACE] * len(str(config.DEFAULT_MAX_WORDS)),
         "5",
         "0",
     )
@@ -451,7 +453,7 @@ def test_strategy_is_applied_alongside_valid_numeric_fields():
     state = at_row(
         settings_screen.initial_state(original),
         settings_screen.ROW_MAX_WORDS,
-        *[keyboard.BACKSPACE] * 3,
+        *[keyboard.BACKSPACE] * len(str(config.DEFAULT_MAX_WORDS)),
         "5",
         "0",
     )

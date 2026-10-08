@@ -115,6 +115,7 @@ class DevAssistantTUI:
         self._print_mcp_summary()
         self._print_schedule_line()
         self._replay_history()
+        self._print_status_bar()
         try:
             while not self.session.exit_requested:
                 try:
@@ -123,6 +124,8 @@ class DevAssistantTUI:
                     break
                 line = line.strip()
                 if not line:
+                    # Пустой Enter — тоже ход цикла: статусная строка должна оставаться на экране.
+                    self._print_status_bar()
                     continue
                 if line.startswith("/"):
                     self._handle_command(line)
@@ -603,13 +606,12 @@ class DevAssistantTUI:
     def _print_status_bar(self) -> None:
         usage = self.session.session_usage
         cost = f"${usage.cost_usd:.6f}" if usage.cost_usd is not None else "неизвестно"
-        settings = self.session.settings
+        branch = self.session.branch
         self.console.print(
             f"[dim]Модель: {escape(self.session.model)}  |  "
             f"Домен: {escape(self.session.domain.id)}  |  "
-            f"Формат: {FORMAT_LABELS[settings.format]}  |  "
-            f"Стратегия: {STRATEGY_LABELS[settings.context_strategy]}  |  "
-            f"Объём: {settings.max_words} слов  |  "
+            f"Проект: {escape(self.session.project_name)}  |  "
+            + (f"Ветка: {escape(branch)}  |  " if branch else "")
             + self._task_status_fragment()
             + self._memory_status_fragment()
             + f"Команды: {' '.join(STATUS_COMMANDS)}  |  "

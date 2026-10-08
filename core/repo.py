@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,28 @@ def ensure_inside(path: str | Path, root: Path) -> Path:
             f"путь {path} ведёт за пределы целевого репозитория {root}"
         )
     return resolved
+
+
+def current_branch(root: Path) -> str:
+    """Имя активной ветки git; пустая строка — ветки нет (не репозиторий или отсоединённый HEAD).
+
+    Нужна статусной строке: пользователь должен видеть, в какой ветке он работает. Ошибки git и
+    отсутствие репозитория — не повод падать: строка просто не показывает ветку.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(Path(root)), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    name = completed.stdout.strip()
+    return "" if name in ("", "HEAD") else name
 
 
 def relative_to_root(path: str | Path, root: Path) -> str:

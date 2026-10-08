@@ -26,6 +26,7 @@ from . import (
     domains,
     mcp_registry,
     mcp_tools,
+    repo,
     long_term_memory,
     memory_layers,
     schedule_store,
@@ -646,6 +647,16 @@ class AssistantSession:
     def invariants_report(self) -> Dict[str, object]:
         with self._lock:
             return self._agent.invariants_report()
+
+    @property
+    def project_name(self) -> str:
+        """Имя каталога целевого проекта: по нему пользователь понимает, с чем работает."""
+        return self.root.name
+
+    @property
+    def branch(self) -> str:
+        """Активная ветка git (пустая строка — ветки нет)."""
+        return repo.current_branch(self.root)
 
     def schedule_report(self):
         """Снимок расписания: задания, прогоны и объём собранного — без запуска заданий."""

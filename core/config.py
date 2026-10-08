@@ -199,7 +199,9 @@ MAX_TEMPERATURE = 2.0
 
 MIN_MAX_WORDS = 10
 MAX_MAX_WORDS = 1000
-DEFAULT_MAX_WORDS = 200
+# По умолчанию — максимум диапазона: пользователь просил не ограничивать ответ, а сузить его
+# всегда можно на экране настроек.
+DEFAULT_MAX_WORDS = MAX_MAX_WORDS
 
 DEFAULT_LIST_LIMIT = 3
 MIN_LIST_LIMIT = 1
