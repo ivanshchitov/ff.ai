@@ -3,87 +3,97 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ff.ai</title>
+<title>ff.ai — ассистент по разработке</title>
 <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
-<header>
-  <h1>ff.ai</h1>
-  <div id="status">Загрузка состояния…</div>
-</header>
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-head">
+    <span class="brand">ff.ai</span>
+    <button id="sidebar-close" class="icon" type="button" title="Скрыть панель">×</button>
+  </div>
 
-<main>
-  <section class="panel">
-    <h2>Вопрос</h2>
-    <form id="ask-form">
-      <input id="question" type="text" autocomplete="off" placeholder="Вопрос по репозиторию или платформе">
-      <button class="primary" type="submit">Спросить</button>
-    </form>
-    <p id="phase" class="phase"></p>
-  </section>
+  <button id="new-session" class="wide ghost" type="button">Новая сессия</button>
 
-  <section class="panel">
-    <h2>Ответ</h2>
-    <div id="answer" class="answer empty">Ответа пока нет.</div>
-    <div id="usage" class="usage"></div>
-    <h3>Источники</h3>
-    <div id="sources" class="sources empty">—</div>
-    <div id="citations" class="citations"></div>
-  </section>
-
-  <section class="panel">
-    <h2>Задача</h2>
-    <div class="controls">
-      <button data-task="run">Запустить прогон</button>
-      <button data-task="pause">Пауза</button>
-      <button data-task="resume">Продолжить</button>
-      <button data-report="task">Обновить</button>
+  <section class="block">
+    <h3>Задача</h3>
+    <div class="row">
+      <button data-task="run" type="button">Запустить</button>
+      <button data-task="pause" type="button">Пауза</button>
+      <button data-task="resume" type="button">Продолжить</button>
     </div>
     <div id="task" class="task empty">Задач нет.</div>
-    <div id="edits" class="hidden">
-      <h3>Правки плана</h3>
-      <form id="edits-form">
-        <input id="edits-input" type="text" autocomplete="off" placeholder="Пустая строка — выполнять план как есть">
-        <button type="submit">Отправить</button>
-      </form>
-    </div>
   </section>
 
-  <section class="panel">
-    <h2>Подтверждения</h2>
-    <div id="confirmations" class="confirmations empty">Запросов нет.</div>
-  </section>
-
-  <section class="panel">
-    <h2>Команда</h2>
-    <form id="command-form">
-      <input id="command" type="text" autocomplete="off" placeholder="/context, /task add …, /ops status">
-      <button type="submit">Выполнить</button>
+  <section class="block">
+    <h3>Настройки</h3>
+    <form id="settings-form" class="settings">
+      <label>Формат ответа
+        <select id="set-format">
+          <option value="free">Свободный</option>
+          <option value="compact">Компактный</option>
+          <option value="json">JSON</option>
+          <option value="patch">Патч</option>
+        </select>
+      </label>
+      <label>Стратегия контекста
+        <select id="set-strategy">
+          <option value="summary">Суммаризация</option>
+          <option value="sliding_window">Скользящее окно</option>
+          <option value="sticky_facts">Липкие факты</option>
+          <option value="branching">Ветвление</option>
+        </select>
+      </label>
+      <label>Модель<select id="set-model"></select></label>
+      <label>Лимит слов ответа<input id="set-words" type="number" min="10" max="1000" step="10"></label>
+      <label>Пунктов в списке<input id="set-list" type="number" min="1" max="20"></label>
+      <label>Температура<input id="set-temperature" type="number" min="0" max="2" step="0.1"></label>
+      <label>Сжатие через, сообщений<input id="set-compress" type="number" min="5" max="50"></label>
+      <label>Потолок токенов сессии<input id="set-tokens" type="number" min="5000" max="50000" step="1000"></label>
+      <button class="wide primary" type="submit">Применить</button>
     </form>
-    <pre id="command-out" class="lines empty">—</pre>
+    <p id="settings-note" class="note"></p>
   </section>
 
-  <section class="panel">
-    <h2>Отчёты</h2>
-    <div class="reports">
-      <button data-report="docs">Документация</button>
-      <button data-report="code">Код</button>
-      <button data-report="tool">Инструменты</button>
-      <button data-report="ops">Операции</button>
-      <button data-report="memory">Память</button>
-      <button data-report="profile">Профиль</button>
-      <button data-report="invariants">Правила</button>
-      <button data-report="context">Контекст</button>
-      <button data-report="usage">Расход</button>
+  <section class="block">
+    <h3>Отчёты</h3>
+    <div class="reports" id="report-buttons">
+      <button class="ghost" data-report="usage" type="button">Расход</button>
+      <button class="ghost" data-report="context" type="button">Контекст</button>
+      <button class="ghost" data-report="docs" type="button">Документация</button>
+      <button class="ghost" data-report="code" type="button">Код</button>
+      <button class="ghost" data-report="tool" type="button">Инструменты</button>
+      <button class="ghost" data-report="ops" type="button">Операции</button>
+      <button class="ghost" data-report="memory" type="button">Память</button>
+      <button class="ghost" data-report="profile" type="button">Профиль</button>
+      <button class="ghost" data-report="invariants" type="button">Правила</button>
+      <button class="ghost" data-report="task" type="button">Задача</button>
     </div>
-    <pre id="report" class="lines empty">—</pre>
+    <pre id="report" class="lines empty">Отчёт не выбран.</pre>
   </section>
+</aside>
 
-  <section class="panel">
-    <h2>Журнал и события</h2>
-    <pre id="events" class="lines empty">—</pre>
-  </section>
-</main>
+<div class="chat">
+  <header class="topbar">
+    <button id="sidebar-open" class="icon" type="button" title="Показать панель">☰</button>
+    <div class="session">
+      <span id="status" class="status">Загрузка состояния…</span>
+      <span id="status-note" class="muted"></span>
+    </div>
+  </header>
+
+  <main id="feed" class="feed"></main>
+
+  <div id="jump" class="jump hidden">
+    <button class="ghost" id="jump-button" type="button">↓ К последнему сообщению</button>
+  </div>
+
+  <form id="composer" class="composer">
+    <textarea id="question" rows="1" autocomplete="off"
+      placeholder="Вопрос или команда (/usage, /task add …, /docs status). Enter — отправить, Shift+Enter — новая строка"></textarea>
+    <button class="primary" id="send" type="submit">Отправить</button>
+  </form>
+</div>
 
 <script src="static/app.js"></script>
 </body>

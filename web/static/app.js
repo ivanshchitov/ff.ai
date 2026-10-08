@@ -1,11 +1,13 @@
 "use strict";
 
-// Фронтенд ff.ai: один файл без сборщика и внешних библиотек.
+// Чат-фронтенд ff.ai: один файл, без сборщика и внешних библиотек.
 //
-// Слой ничего не решает сам: он показывает то, что отдали эндпоинты (`/api/ask`, `/api/command`,
-// `/api/reports/...`) и поток событий `/api/events`. Всё, что приходит с сервера, попадает в DOM
-// через textContent: это чужие тексты (ответы модели, фрагменты документации, диффы патчей), и
-// разметку из них строить нельзя.
+// Лента — основная форма: вопрос пользователя, ответ ассистента, а под ответом — то, что относится
+// именно к нему: фаза запроса, строки журнала, метрики, предупреждения, источники и цитаты.
+//
+// Правило экранирования: всё, что приходит с сервера (ответ модели, фрагменты документации, диффы
+// патчей, отчёты, строки журнала), сначала экранируется целиком, и только потом в экранированном
+// тексте распознаётся минимальная разметка. Разметку из чужих данных строить нельзя.
 
 const PHASE_LABELS = {
   request: "Отправка вопроса…",
@@ -36,37 +38,171 @@ const CONFIRMATION_LABELS = {
 
 const el = (id) => document.getElementById(id);
 
-function clear(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
+// --- тексты и минимальная разметка -----------------------------------------------------------
+
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+function escapeText(value) {
+  return String(value === null || value === undefined ? "" : value).replace(
+    /[&<>"']/g,
+    (char) => ESCAPES[char],
+  );
 }
 
 function textNode(tag, className, value) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  node.textContent = value;
+  if (value !== undefined) node.textContent = value;
   return node;
 }
 
-function setText(node, value) {
-  node.textContent = value;
-  node.classList.toggle("empty", !value);
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function button(label, className) {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = className || "";
+  node.textContent = label;
+  return node;
+}
+
+// Экранированный текст → фрагмент: блоки кода, заголовки, списки, внутристрочный код и жирный.
+function markup(text) {
+  const fragment = document.createDocumentFragment();
+  const parts = String(text === null || text === undefined ? "" : text).split("```");
+  parts.forEach((part, index) => {
+    if (index % 2 === 1) {
+      fragment.appendChild(codeBlock(part));
+      return;
+    }
+    appendRichText(fragment, part);
+  });
+  return fragment;
+}
+
+function codeBlock(raw) {
+  const lines = raw.replace(/^\n/, "").split("\n");
+  const language = (lines[0] || "").trim();
+  const hasLanguage = language && !/\s/.test(language) && language.length <= 20;
+  const body = (hasLanguage ? lines.slice(1) : lines).join("\n").replace(/\n$/, "");
+  const wrap = document.createElement("div");
+  wrap.className = "code";
+  const head = document.createElement("div");
+  head.className = "code-head";
+  head.appendChild(textNode("span", "", hasLanguage ? language : "текст"));
+  const copy = button("Копировать", "ghost");
+  copy.addEventListener("click", () => copyCode(copy, body));
+  head.appendChild(copy);
+  wrap.appendChild(head);
+  const pre = document.createElement("pre");
+  pre.appendChild(textNode("code", "", body));
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+function inlineFragment(escaped) {
+  const fragment = document.createDocumentFragment();
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*/g;
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(escaped)) !== null) {
+    if (match.index > last) fragment.appendChild(document.createTextNode(escaped.slice(last, match.index)));
+    if (match[1] !== undefined) fragment.appendChild(textNode("code", "md-code", match[1]));
+    else fragment.appendChild(textNode("strong", "", match[2]));
+    last = pattern.lastIndex;
+  }
+  if (last < escaped.length) fragment.appendChild(document.createTextNode(escaped.slice(last)));
+  return fragment;
+}
+
+function inlineText(escaped) {
+  const holder = document.createDocumentFragment();
+  holder.appendChild(inlineFragment(escaped));
+  return holder;
+}
+
+function appendRichText(host, raw) {
+  const escaped = escapeText(raw);
+  let list = null;
+  let tag = "";
+  const flush = () => {
+    if (list) {
+      host.appendChild(list);
+      list = null;
+      tag = "";
+    }
+  };
+  for (const line of escaped.split("\n")) {
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      const node = textNode("h4", "md-heading");
+      node.appendChild(inlineText(heading[2]));
+      host.appendChild(node);
+      continue;
+    }
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    const ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || ordered) {
+      const wanted = ordered ? "ol" : "ul";
+      if (!list || tag !== wanted) {
+        flush();
+        list = document.createElement(wanted);
+        list.className = "md-list";
+        tag = wanted;
+      }
+      const item = document.createElement("li");
+      item.appendChild(inlineFragment((bullet || ordered)[1]));
+      list.appendChild(item);
+      continue;
+    }
+    flush();
+    if (!line.trim()) continue;
+    const paragraph = textNode("p", "md-p");
+    paragraph.appendChild(inlineFragment(line));
+    host.appendChild(paragraph);
+  }
+  flush();
+}
+
+async function copyCode(node, text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    node.textContent = "Скопировано";
+  } catch (error) {
+    node.textContent = "Не скопировано";
+  }
+  setTimeout(() => {
+    node.textContent = "Копировать";
+  }, 1500);
 }
 
 // --- обращения к серверу ---------------------------------------------------------------------
 
 async function request(path, options) {
   const response = await fetch(path, options);
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch (error) {
-    payload = null;
-  }
   if (!response.ok) {
-    const detail = payload && payload.detail ? payload.detail : response.statusText;
-    throw new Error(detail || "Запрос не выполнен");
+    let detail = response.statusText;
+    try {
+      const payload = await response.json();
+      if (payload && payload.detail) detail = payload.detail;
+    } catch (error) {
+      /* тело не JSON — остаётся статус */
+    }
+    throw new Error(detail);
   }
-  return payload || {};
+  return response.json();
 }
 
 const postJson = (path, body) =>
@@ -76,10 +212,104 @@ const postJson = (path, body) =>
     body: JSON.stringify(body),
   });
 
-// --- ответ, источники и цитаты ----------------------------------------------------------------
+// --- лента: сообщения, прокрутка --------------------------------------------------------------
 
-function usageLine(meta) {
-  if (!meta) return "";
+const state = { busy: false, stick: true, current: null, confirmations: new Map() };
+
+function atBottom() {
+  const feed = el("feed");
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+}
+
+function stickToBottom(force) {
+  if (!state.stick && !force) return;
+  const feed = el("feed");
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function message(role) {
+  const node = document.createElement("article");
+  node.className = "msg " + (role === "user" ? "user" : "assistant");
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  const body = document.createElement("div");
+  body.className = "markup";
+  bubble.appendChild(body);
+  node.appendChild(bubble);
+  el("feed").appendChild(node);
+  stickToBottom();
+  return { node, bubble, body, journal: new Set(), notes: null, phase: null, meta: null };
+}
+
+function userMessage(text) {
+  const entry = message("user");
+  entry.body.appendChild(markup(text));
+  return entry;
+}
+
+function assistantStart() {
+  const entry = message("assistant");
+  entry.body.appendChild(textNode("span", "typing", "печатает"));
+  state.current = entry;
+  return entry;
+}
+
+function assistantFinish(entry) {
+  const typing = entry.body.querySelector(".typing");
+  if (typing) typing.remove();
+  entry.body.normalize();
+  if (state.current === entry) state.current = null;
+}
+
+function notesHost(entry) {
+  if (!entry.notes) {
+    entry.notes = textNode("div", "notes");
+    entry.node.appendChild(entry.notes);
+  }
+  return entry.notes;
+}
+
+function addNote(entry, text) {
+  notesHost(entry).appendChild(textNode("div", "", text));
+  stickToBottom();
+}
+
+function setPhase(text) {
+  const entry = state.current;
+  if (!entry) return;
+  if (!entry.phase) {
+    entry.phase = textNode("div", "phase");
+    entry.node.appendChild(entry.phase);
+  }
+  entry.phase.textContent = text;
+  stickToBottom();
+}
+
+function addJournal(text) {
+  const entry = state.current || lastAssistant();
+  if (!entry) {
+    const created = message("assistant");
+    created.bubble.classList.add("command");
+    addNote(created, text);
+    return;
+  }
+  addJournalTo(entry, text);
+}
+
+function addJournalTo(entry, text) {
+  if (entry.journal.has(text)) return;
+  entry.journal.add(text);
+  addNote(entry, text);
+}
+
+function lastAssistant() {
+  const nodes = el("feed").querySelectorAll(".msg.assistant");
+  if (!nodes.length) return null;
+  const node = nodes[nodes.length - 1];
+  return { node, bubble: node.querySelector(".bubble"), body: node.querySelector(".markup"), journal: new Set(), notes: node.querySelector(".notes") };
+}
+
+function metaLine(meta) {
   const seconds = typeof meta.elapsed_seconds === "number" ? meta.elapsed_seconds.toFixed(2) : "н/д";
   const cost = meta.cost_usd === null || meta.cost_usd === undefined
     ? "неизвестно"
@@ -87,220 +317,334 @@ function usageLine(meta) {
   const speed = meta.elapsed_seconds > 0 && meta.completion_tokens > 0
     ? (meta.completion_tokens / meta.elapsed_seconds).toFixed(2) + " ток/сек"
     : "н/д";
-  let line = "⏱ " + seconds + "с | Токены: " + meta.prompt_tokens + "+" + meta.completion_tokens +
-    "=" + meta.total_tokens + " | Стоимость: " + cost + " | Средняя скорость: " + speed;
+  return "⏱ " + seconds + " с · токены " + meta.prompt_tokens + "+" + meta.completion_tokens +
+    "=" + meta.total_tokens + " · стоимость " + cost + " · " + speed;
+}
+
+function renderMeta(entry, meta) {
+  if (!meta) return;
+  entry.meta = textNode("div", "meta", metaLine(meta));
+  entry.node.appendChild(entry.meta);
   if (meta.finish_reason === "length") {
-    line += "\n⚠ ответ мог быть обрезан техническим потолком запроса";
+    const warn = meta.total_tokens > 0 && !meta.completion_tokens
+      ? "⚠ модель исчерпала бюджет max_tokens: ответа нет"
+      : "⚠ ответ мог быть обрезан техническим потолком запроса";
+    entry.node.appendChild(textNode("div", "meta warn", warn));
   }
-  return line;
 }
 
-function citationsLine(check) {
-  // Формулировка приходит с сервера: снимок проверки ссылок — источник истины, а не разметка.
-  return check && check.line ? check.line : "";
+function renderCitations(entry, check) {
+  if (!check || !check.line) return;
+  entry.node.appendChild(textNode("div", "citations", check.line));
 }
 
-function renderSources(sources) {
-  const host = el("sources");
-  clear(host);
-  if (!sources || !sources.length) {
-    host.className = "sources empty";
-    host.textContent = "Источников не было.";
-    return;
-  }
-  host.className = "sources";
+function renderSources(entry, sources) {
+  if (!sources || !sources.length) return;
+  const details = document.createElement("details");
+  details.className = "sources";
+  details.appendChild(textNode("summary", "", "Источников: " + sources.length));
   const list = document.createElement("ul");
   for (const source of sources) {
     const item = document.createElement("li");
     item.appendChild(textNode("span", "ident", source.identifier || "—"));
-    item.appendChild(document.createTextNode(" "));
     const where = [source.title, source.section].filter(Boolean).join(" — ");
-    if (where) item.appendChild(textNode("span", "where", where));
+    if (where) item.appendChild(document.createTextNode(" " + where));
     if (source.text) {
-      const details = document.createElement("details");
-      details.appendChild(textNode("summary", "", "фрагмент" + (source.truncated ? " (обрезан)" : "")));
-      details.appendChild(textNode("span", "quote", source.text));
-      item.appendChild(details);
+      const nested = document.createElement("details");
+      nested.appendChild(textNode("summary", "", "фрагмент" + (source.truncated ? " (обрезан)" : "")));
+      nested.appendChild(textNode("span", "quote", source.text));
+      item.appendChild(nested);
     }
     list.appendChild(item);
   }
-  host.appendChild(list);
+  details.appendChild(list);
+  entry.node.appendChild(details);
 }
 
-function renderAnswer(payload) {
-  setText(el("answer"), payload.answer || "");
-  setText(el("usage"), usageLine(payload.meta));
-  renderSources(payload.sources);
-  setText(el("citations"), citationsLine(payload.citations));
+// --- вопрос и команды ------------------------------------------------------------------------
+
+async function ask(question) {
+  if (state.busy) return;
+  state.busy = true;
+  el("send").disabled = true;
+  userMessage(question);
+  const entry = assistantStart();
+  setPhase("Отправка вопроса…");
+  try {
+    const payload = await postJson("api/ask", { question });
+    entry.body.replaceChildren(markup(payload.answer || ""));
+    for (const line of payload.journal || []) addJournalTo(entry, line);
+    renderMeta(entry, payload.meta);
+    renderSources(entry, payload.sources);
+    renderCitations(entry, payload.citations);
+    if (!payload.answer) entry.bubble.classList.add("error");
+  } catch (error) {
+    entry.bubble.classList.add("error");
+    entry.body.replaceChildren(textNode("p", "md-p", "Ошибка запроса: " + error.message));
+  } finally {
+    if (entry.phase) entry.phase.remove();
+    assistantFinish(entry);
+    state.busy = false;
+    el("send").disabled = false;
+    stickToBottom(true);
+  }
 }
 
-// --- задача и диффы патчей --------------------------------------------------------------------
+async function runCommand(line) {
+  userMessage(line);
+  const entry = message("assistant");
+  entry.bubble.classList.add("command");
+  try {
+    const payload = await postJson("api/command", { text: line });
+    const lines = payload.lines || [];
+    entry.body.appendChild(markup(lines.join("\n") || "Команда выполнена."));
+    if (payload.unknown) addNote(entry, "команда неизвестна");
+    if (payload.domain_changed) await loadStatus();
+    if (payload.task_run_started) addNote(entry, "прогон задачи запущен");
+    if (payload.profile_setup) {
+      addNote(entry, "начата настройка профиля: ответьте на вопрос в терминале — в браузере диалог профиля пока не поддержан");
+    }
+  } catch (error) {
+    entry.bubble.classList.add("error");
+    entry.body.replaceChildren(textNode("p", "md-p", "Ошибка команды: " + error.message));
+  }
+  stickToBottom(true);
+}
 
-function renderTask(snapshot) {
+// --- задача ----------------------------------------------------------------------------------
+
+function renderTask(snapshot, running) {
   const host = el("task");
   clear(host);
   const tasks = (snapshot && snapshot.tasks) || [];
+  host.className = "task" + (tasks.length ? "" : " empty");
   if (!tasks.length) {
-    host.className = "task empty";
     host.textContent = "Задач нет. Добавить: команда «/task add <цель>».";
     return;
   }
-  host.className = "task";
-  tasks.forEach((task, position) => {
+  for (const task of tasks) {
     const card = document.createElement("div");
-    const head = (position === snapshot.active ? "▶ " : "") + "Задача " + task.number +
-      " (" + task.title + "): " + task.goal;
-    card.appendChild(textNode("div", "goal", head));
-
-    const stages = document.createElement("div");
-    stages.className = "stages";
-    STAGES.forEach(([id, title], index) => {
-      if (index) stages.appendChild(document.createTextNode(" → "));
-      stages.appendChild(id === task.stage ? textNode("b", "", title) : textNode("span", "", title));
-    });
-    card.appendChild(stages);
-
-    card.appendChild(textNode("div", "meta", "Шаг: " + task.current_step + " · Ожидается: " + task.expected_action));
-    if (task.status) card.appendChild(textNode("div", "meta", "Состояние: " + task.status));
-
-    if (task.plan && task.plan.length) {
+    const current = snapshot && snapshot.current === task.number;
+    card.className = "task-card" + (current ? " current" : "");
+    card.appendChild(textNode("div", "task-goal", "Задача " + task.number + ": " + (task.goal || "без цели")));
+    const stage = (STAGES.find(([value]) => value === task.stage) || ["", task.stage])[1];
+    const flags = [];
+    if (task.status) flags.push(task.status);
+    if (task.awaiting_edits) flags.push("ждёт правок");
+    if (running && current) flags.push("выполняется");
+    card.appendChild(textNode("div", "task-line", "Этап: " + stage + (flags.length ? " · " + flags.join(", ") : "")));
+    if (task.current_step) card.appendChild(textNode("div", "task-line", task.current_step));
+    if (task.expected_action) card.appendChild(textNode("div", "task-line", "Ожидается: " + task.expected_action));
+    const plan = task.plan || [];
+    if (plan.length) {
       const list = document.createElement("ul");
-      list.className = "plan";
-      for (const entry of task.plan) {
-        const item = document.createElement("li");
-        const mark = textNode("span", entry.applied ? "mark-ok" : "mark-todo", entry.applied ? "[x]" : "[ ]");
-        item.appendChild(mark);
-        item.appendChild(document.createTextNode(" " + entry.index + ". " + entry.item));
-        if (entry.patch) {
-          const details = document.createElement("details");
-          const state = entry.applied
-            ? textNode("span", "applied", " — применён")
-            : textNode("span", "skipped", " — " + (entry.reason || "не применён"));
-          const summary = document.createElement("summary");
-          summary.textContent = entry.summary || ("патч подзадачи " + entry.index);
-          summary.appendChild(state);
-          details.appendChild(summary);
-          details.appendChild(textNode("pre", "", entry.patch));
-          item.appendChild(details);
-        } else if (entry.reason) {
-          item.appendChild(textNode("span", "skipped", " — " + entry.reason));
-        }
-        list.appendChild(item);
+      list.className = "task-plan";
+      for (const item of plan) {
+        const li = document.createElement("li");
+        li.className = "task-item" + (item.applied ? " applied" : "");
+        li.textContent = (item.applied ? "[x] " : "[ ] ") + item.item;
+        list.appendChild(li);
       }
       card.appendChild(list);
     }
+    host.appendChild(card);
+  }
+}
 
-    if (task.issues && task.issues.length) {
-      const issues = document.createElement("ul");
-      issues.className = "issues";
-      for (const issue of task.issues) issues.appendChild(textNode("li", "", issue));
-      card.appendChild(issues);
+function editsCard(event) {
+  const entry = message("assistant");
+  const card = document.createElement("div");
+  card.className = "confirm";
+  card.appendChild(textNode("div", "confirm-kind", "Правки плана"));
+  card.appendChild(textNode("div", "confirm-summary", event.label || "Планирование"));
+  const area = document.createElement("textarea");
+  area.rows = 3;
+  area.placeholder = "Пустая строка — выполнять план как есть";
+  card.appendChild(area);
+  const row = document.createElement("div");
+  row.className = "row";
+  const send = button("Отправить", "primary");
+  const asIs = button("Как есть", "ghost");
+  const submit = async (text) => {
+    send.disabled = true;
+    asIs.disabled = true;
+    try {
+      const payload = await postJson("api/task", { action: "edits", text });
+      addNote(entry, payload.accepted ? "правки отправлены" : "правки не приняты: прогон не ждёт решения");
+      card.remove();
+    } catch (error) {
+      addNote(entry, "правки не отправлены: " + error.message);
+      send.disabled = false;
+      asIs.disabled = false;
     }
-    if (task.result_path) card.appendChild(textNode("div", "meta", "Отчёт: " + task.result_path));
-    if (task.fail_reason) card.appendChild(textNode("div", "issues", "Причина неудачи: " + task.fail_reason));
-    host.appendChild(card);
-  });
-
-  el("edits").classList.toggle("hidden", !tasks.some((task) => task.awaiting_edits));
+  };
+  send.addEventListener("click", () => submit(area.value));
+  asIs.addEventListener("click", () => submit(""));
+  row.appendChild(send);
+  row.appendChild(asIs);
+  card.appendChild(row);
+  entry.node.appendChild(card);
+  stickToBottom(true);
+  area.focus();
 }
 
-// --- подтверждения ----------------------------------------------------------------------------
+// --- подтверждения ---------------------------------------------------------------------------
 
-const resolvedConfirmations = new Set();
-
-function renderConfirmations(pending) {
-  const host = el("confirmations");
-  const open = pending.filter((item) => !resolvedConfirmations.has(item.id));
-  clear(host);
-  if (!open.length) {
-    host.className = "confirmations empty";
-    host.textContent = "Запросов нет.";
-    return;
+function confirmationCard(payload) {
+  const entry = message("assistant");
+  const card = document.createElement("div");
+  card.className = "confirm";
+  card.dataset.confirmation = payload.id;
+  card.appendChild(textNode("div", "confirm-kind", CONFIRMATION_LABELS[payload.kind] || payload.kind));
+  card.appendChild(textNode("div", "confirm-summary", payload.summary || ""));
+  if (payload.detail) {
+    const pre = document.createElement("pre");
+    pre.className = "lines";
+    pre.textContent = payload.detail;
+    card.appendChild(pre);
   }
-  host.className = "confirmations";
-  for (const item of open) {
-    const card = document.createElement("div");
-    card.className = "confirmation";
-    card.dataset.confirm = item.id;
-    card.appendChild(textNode("div", "kind", CONFIRMATION_LABELS[item.kind] || item.kind));
-    card.appendChild(textNode("div", "", item.summary || ""));
-    if (item.detail) card.appendChild(textNode("pre", "", item.detail));
-    const actions = document.createElement("div");
-    actions.className = "actions";
-    const approve = textNode("button", "approve", "Применить");
-    const reject = textNode("button", "reject", "Отклонить");
-    approve.addEventListener("click", () => answerConfirmation(item.id, true));
-    reject.addEventListener("click", () => answerConfirmation(item.id, false));
-    actions.appendChild(approve);
-    actions.appendChild(reject);
-    card.appendChild(actions);
-    host.appendChild(card);
-  }
+  const row = document.createElement("div");
+  row.className = "row";
+  const yes = button("Подтвердить", "primary");
+  const no = button("Отклонить", "ghost");
+  const answer = async (approved) => {
+    yes.disabled = true;
+    no.disabled = true;
+    try {
+      await postJson("api/confirm", { id: payload.id, approved });
+    } catch (error) {
+      addNote(entry, "ответ не отправлен: " + error.message);
+      yes.disabled = false;
+      no.disabled = false;
+    }
+  };
+  yes.addEventListener("click", () => answer(true));
+  no.addEventListener("click", () => answer(false));
+  row.appendChild(yes);
+  row.appendChild(no);
+  card.appendChild(row);
+  entry.node.appendChild(card);
+  state.confirmations.set(payload.id, card);
+  stickToBottom(true);
 }
 
-async function answerConfirmation(id, approved) {
+function markConfirmation(event) {
+  const card = state.confirmations.get(event.id);
+  if (!card) return;
+  card.classList.add(event.approved ? "done" : "declined");
+  for (const control of card.querySelectorAll(".row button")) control.remove();
+  const verdict = event.timeout
+    ? "ответа не было — отказ по таймауту"
+    : (event.approved ? "подтверждено" : "отклонено");
+  card.appendChild(textNode("div", "task-line", verdict));
+}
+
+async function loadConfirmations() {
   try {
-    await postJson("api/confirm", { id, approved });
-    resolvedConfirmations.add(id);
-    const card = el("confirmations").querySelector('[data-confirm="' + id + '"]');
-    if (card) {
-      card.classList.add("resolved");
-      const actions = card.querySelector(".actions");
-      if (actions) actions.textContent = approved ? "Применено." : "Отклонено.";
+    const payload = await request("api/confirmations");
+    for (const pending of payload.pending || []) {
+      if (!state.confirmations.has(pending.id)) confirmationCard(pending);
     }
-    logEvent("подтверждение: " + (approved ? "применено" : "отклонено") + " (" + id + ")");
   } catch (error) {
-    logEvent("ошибка подтверждения: " + error.message);
+    addNote(message("assistant"), "запросы подтверждения не получены: " + error.message);
   }
 }
 
-// --- журнал событий ---------------------------------------------------------------------------
+// --- состояние, настройки и отчёты -----------------------------------------------------------
 
-const eventLines = [];
-
-function logEvent(line) {
-  eventLines.push(line);
-  while (eventLines.length > 200) eventLines.shift();
-  setText(el("events"), eventLines.join("\n"));
+function fillSettings(status) {
+  const settings = status.settings || {};
+  el("set-format").value = settings.format || "free";
+  el("set-strategy").value = settings.context_strategy || "summary";
+  el("set-words").value = settings.max_words ?? "";
+  el("set-list").value = settings.list_limit ?? "";
+  el("set-temperature").value = settings.temperature ?? "";
+  el("set-compress").value = settings.compress_after ?? "";
+  el("set-tokens").value = settings.max_session_tokens ?? "";
+  const select = el("set-model");
+  clear(select);
+  for (const name of status.models || [status.model]) {
+    select.appendChild(textNode("option", "", name));
+    select.lastChild.value = name;
+  }
+  select.value = status.model;
 }
+
+function renderStatus(status) {
+  const settings = status.settings || {};
+  el("status").textContent = [
+    status.domain.title + " (" + status.domain.id + ")",
+    "Модель: " + status.model,
+    "Формат: " + (settings.format || "?"),
+    "Стратегия: " + (settings.context_strategy || "?"),
+    "Слов: " + settings.max_words,
+  ].join(" · ");
+  const flags = [];
+  flags.push(status.docs_enabled ? "документация вкл" : "документация выкл");
+  flags.push(status.code_enabled ? "код вкл" : "код выкл");
+  if (status.mcp) flags.push(status.mcp);
+  el("status-note").textContent = status.root + " · " + flags.join(" · ");
+}
+
+async function loadStatus() {
+  try {
+    const status = await request("api/status");
+    renderStatus(status);
+    fillSettings(status);
+  } catch (error) {
+    el("status").textContent = "Состояние не получено: " + error.message;
+  }
+}
+
+async function loadReport(kind) {
+  const host = el("report");
+  host.className = "lines";
+  host.textContent = "Загрузка отчёта «" + kind + "»…";
+  try {
+    const payload = await request("api/reports/" + kind);
+    const lines = payload.lines || [];
+    host.textContent = lines.length ? lines.join("\n") : "Отчёт пуст.";
+    if (kind === "task") renderTask(payload.data);
+  } catch (error) {
+    host.textContent = "Отчёт не получен: " + error.message;
+  }
+}
+
+// --- события ---------------------------------------------------------------------------------
 
 function handleEvent(event) {
   switch (event.type) {
     case "phase":
-      setText(el("phase"), PHASE_LABELS[event.phase] || event.phase);
-      logEvent("фаза: " + (PHASE_LABELS[event.phase] || event.phase));
+      setPhase(PHASE_LABELS[event.phase] || event.phase);
       break;
     case "journal":
-      logEvent(event.text);
-      break;
-    case "answer":
-      setText(el("phase"), "");
-      logEvent("ответ готов: " + (event.question || ""));
+      addJournal(event.text);
       break;
     case "domain":
-      logEvent("домен: " + event.title + " (" + event.source + ")");
-      break;
-    case "command":
-      logEvent("команда " + event.data.command + ": " + (event.data.lines || []).join(" "));
-      break;
-    case "task":
-      renderTask(event.data);
-      logEvent("задача: " + (event.running ? "прогон идёт" : "прогон остановлен"));
-      break;
-    case "task_edits_request":
-      el("edits").classList.remove("hidden");
-      renderTask(event.data);
-      logEvent("нужны правки плана");
+      loadStatus();
       break;
     case "confirmation_request":
-      logEvent("запрос подтверждения: " + (event.summary || event.kind));
-      renderConfirmations([event]);
+      confirmationCard(event);
       break;
     case "confirmation_result":
-      if (event.timeout) logEvent("подтверждение не получено — отказ по таймауту");
+      markConfirmation(event);
+      break;
+    case "task":
+      renderTask(event.data, event.running);
+      break;
+    case "task_edits_request":
+      editsCard(event);
+      break;
+    case "settings":
+      loadStatus();
+      break;
+    case "answer":
+    case "command":
+      // Ответ и вывод команды рендерит тот, кто их запросил: поток лишь повторяет результат,
+      // и второй разрисовки сообщения быть не должно.
       break;
     default:
-      logEvent("событие: " + (event.name || event.type));
+      break;
   }
 }
 
@@ -310,112 +654,120 @@ function connectEvents() {
     try {
       handleEvent(JSON.parse(message.data));
     } catch (error) {
-      logEvent("нераспознанное событие: " + message.data);
+      addJournal("нераспознанное событие потока");
     }
   });
-  stream.addEventListener("error", () => logEvent("поток событий переподключается…"));
+  stream.addEventListener("error", () => {
+    /* переподключение делает сам EventSource: строка в журнале не нужна */
+  });
 }
 
-// --- отчёты и команды -------------------------------------------------------------------------
+// --- композер и привязки ---------------------------------------------------------------------
 
-async function loadReport(kind) {
-  try {
-    const payload = await request("api/reports/" + kind);
-    setText(el("report"), "=== " + kind + " ===\n" + (payload.lines || []).join("\n"));
-    if (kind === "task") renderTask(payload.data);
-    if (kind === "docs") setText(el("citations"), citationsLine(payload.citations));
-  } catch (error) {
-    setText(el("report"), "Отчёт не получен: " + error.message);
-  }
+function autoGrow(area) {
+  area.style.height = "auto";
+  area.style.height = Math.min(area.scrollHeight, 180) + "px";
 }
 
-async function loadStatus() {
-  try {
-    const status = await request("api/status");
-    const settings = status.settings || {};
-    const parts = [
-      "Домен: " + status.domain.title + " (" + status.domain.id + ")",
-      "Модель: " + status.model,
-      "Формат: " + (settings.format || "?"),
-      "Стратегия: " + (settings.context_strategy || "?"),
-      "Слов: " + settings.max_words,
-    ];
-    if (status.mcp) parts.push(status.mcp);
-    setText(el("status"), parts.join(" · "));
-  } catch (error) {
-    setText(el("status"), "Состояние не получено: " + error.message);
-  }
-}
-
-async function loadConfirmations() {
-  try {
-    const payload = await request("api/confirmations");
-    renderConfirmations(payload.pending || []);
-  } catch (error) {
-    logEvent("запросы подтверждения не получены: " + error.message);
-  }
-}
-
-async function runCommand(line) {
-  try {
-    const payload = await postJson("api/command", { text: line });
-    setText(el("command-out"), (payload.lines || []).join("\n") || "Команда выполнена.");
-    if (payload.task_run_started) logEvent("прогон задачи запущен");
-  } catch (error) {
-    setText(el("command-out"), "Ошибка: " + error.message);
-  }
+function compose(text) {
+  const value = text.trim();
+  if (!value || state.busy) return;
+  if (value.startsWith("/")) runCommand(value);
+  else ask(value);
 }
 
 function bind() {
-  el("ask-form").addEventListener("submit", async (formEvent) => {
-    formEvent.preventDefault();
-    const question = el("question").value.trim();
-    if (!question) return;
-    el("question").value = "";
-    setText(el("phase"), "Отправка вопроса…");
-    try {
-      renderAnswer(await postJson("api/ask", { question }));
-    } catch (error) {
-      setText(el("answer"), "Ошибка запроса: " + error.message);
-    } finally {
-      setText(el("phase"), "");
+  el("composer").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const area = el("question");
+    const text = area.value;
+    area.value = "";
+    autoGrow(area);
+    compose(text);
+  });
+
+  el("question").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      el("composer").requestSubmit();
     }
   });
 
-  el("command-form").addEventListener("submit", (formEvent) => {
-    formEvent.preventDefault();
-    const line = el("command").value.trim();
-    if (!line) return;
-    el("command").value = "";
-    runCommand(line);
+  el("question").addEventListener("input", () => autoGrow(el("question")));
+
+  const feed = el("feed");
+  feed.addEventListener("scroll", () => {
+    state.stick = atBottom();
+    el("jump").classList.toggle("hidden", state.stick);
   });
 
-  el("edits-form").addEventListener("submit", async (formEvent) => {
-    formEvent.preventDefault();
-    const value = el("edits-input").value;
-    el("edits-input").value = "";
+  el("jump-button").addEventListener("click", () => {
+    state.stick = true;
+    el("jump").classList.add("hidden");
+    stickToBottom(true);
+  });
+
+  el("sidebar-open").addEventListener("click", () => document.body.classList.remove("sidebar-hidden"));
+  el("sidebar-close").addEventListener("click", () => document.body.classList.add("sidebar-hidden"));
+
+  el("new-session").addEventListener("click", async () => {
+    await runCommand("/clear");
+    clear(feed);
+    addNote(message("assistant"), "новая сессия: диалог очищен, память и профиль сохранены");
+  });
+
+  el("settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const note = el("settings-note");
+    note.className = "note";
+    note.textContent = "Применяю…";
+    const number = (id) => {
+      const raw = el(id).value.trim();
+      return raw === "" ? null : Number(raw);
+    };
+    const body = {
+      format: el("set-format").value,
+      context_strategy: el("set-strategy").value,
+      model: el("set-model").value,
+      max_words: number("set-words"),
+      list_limit: number("set-list"),
+      temperature: number("set-temperature"),
+      compress_after: number("set-compress"),
+      max_session_tokens: number("set-tokens"),
+    };
+    for (const key of Object.keys(body)) {
+      if (body[key] === null) delete body[key];
+    }
     try {
-      await postJson("api/task", { action: "edits", text: value });
-      el("edits").classList.add("hidden");
+      const payload = await postJson("api/settings", body);
+      note.className = "note ok";
+      note.textContent = "Настройки применены";
+      renderStatus({ ...(await request("api/status")), ...payload, settings: payload.settings });
     } catch (error) {
-      logEvent("правки не приняты: " + error.message);
+      note.className = "note error";
+      note.textContent = "Не применено: " + error.message;
+      await loadStatus();
     }
   });
 
-  document.querySelectorAll("button[data-report]").forEach((button) => {
-    button.addEventListener("click", () => loadReport(button.dataset.report));
+  document.querySelectorAll("button[data-report]").forEach((node) => {
+    node.addEventListener("click", () => loadReport(node.dataset.report));
   });
 
-  document.querySelectorAll("button[data-task]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const action = button.dataset.task;
+  document.querySelectorAll("button[data-task]").forEach((node) => {
+    node.addEventListener("click", async () => {
+      const action = node.dataset.task;
       if (action === "run") {
-        runCommand("/task run");
+        await runCommand("/task run");
         return;
       }
-      postJson("api/task", { action })
-        .then((payload) => logEvent("прогон: " + action + " — " + (payload.accepted ? "принято" : "не принято")))
-        .catch((error) => logEvent("прогон: " + action + " — " + error.message));
+      try {
+        const payload = await postJson("api/task", { action });
+        addNote(lastAssistant() || message("assistant"),
+          "прогон: " + action + " — " + (payload.accepted ? "принято" : "не принято"));
+      } catch (error) {
+        addNote(lastAssistant() || message("assistant"), "прогон: " + action + " — " + error.message);
+      }
     });
   });
 }
@@ -425,3 +777,4 @@ connectEvents();
 loadStatus();
 loadConfirmations();
 loadReport("task");
+autoGrow(el("question"));

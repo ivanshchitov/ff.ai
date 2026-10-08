@@ -240,16 +240,19 @@ def _model_double(stub):
 
 
 def test_page_and_script_are_served_from_disk(web: WebServer):
+    """Страница отдаётся как чат: лента и композер на месте, внешних источников нет."""
     status, page = http_text(f"{web.url}/")
     assert status == 200
     assert "ff.ai" in page
+    assert 'id="feed"' in page and 'id="composer"' in page
     assert "http://" not in page and "https://" not in page
     status, script = http_text(f"{web.url}/static/app.js")
     assert status == 200
     assert "EventSource" in script
+    assert "api/ask" in script
     status, style = http_text(f"{web.url}/static/style.css")
     assert status == 200
-    assert "panel" in style
+    assert ".msg.user .bubble" in style and ".composer" in style
 
 
 def test_ask_goes_through_the_session_to_the_model(web: WebServer, stub):
@@ -268,3 +271,52 @@ def test_ask_goes_through_the_session_to_the_model(web: WebServer, stub):
     assert usage["data"]["session"]["total_tokens"] == 150
 
 
+
+
+def test_settings_are_changed_from_the_browser(web: WebServer) -> None:
+    """Частичное изменение применяется: поля, которых нет в запросе, остаются прежними."""
+    _, before = http_json(f"{web.url}/api/status")
+    status, payload = http_json(f"{web.url}/api/settings", {"max_words": 250})
+    assert status == 200, payload
+    assert payload["settings"]["max_words"] == 250
+    _, after = http_json(f"{web.url}/api/status")
+    assert after["settings"]["max_words"] == 250
+    assert after["settings"]["temperature"] == before["settings"]["temperature"]
+    assert after["settings"]["format"] == before["settings"]["format"]
+
+
+def test_invalid_setting_is_refused_and_changes_nothing(web: WebServer) -> None:
+    """Недопустимое значение — отказ с сообщением; действующие настройки остаются прежними."""
+    _, before = http_json(f"{web.url}/api/status")
+    status, payload = http_json(f"{web.url}/api/settings", {"temperature": 0.55})
+    assert status == 400
+    assert payload["detail"]
+    _, after = http_json(f"{web.url}/api/status")
+    assert after["settings"] == before["settings"]
+
+
+def test_out_of_range_setting_keeps_the_whole_object(web: WebServer) -> None:
+    """Отказ по одному полю не применяет и соседние поля того же запроса."""
+    _, before = http_json(f"{web.url}/api/status")
+    status, _ = http_json(f"{web.url}/api/settings", {"max_words": 111, "compress_after": 3})
+    assert status == 400
+    _, after = http_json(f"{web.url}/api/status")
+    assert after["settings"] == before["settings"]
+
+
+def test_model_is_changed_and_unknown_model_is_refused(web: WebServer) -> None:
+    """Модель меняется по списку доступных, неизвестная отклоняется без смены состояния."""
+    _, status_payload = http_json(f"{web.url}/api/status")
+    available = status_payload["models"]
+    assert available and status_payload["model"] in available
+    target = next(name for name in available if name != status_payload["model"])
+    status, payload = http_json(f"{web.url}/api/settings", {"model": target})
+    assert status == 200, payload
+    assert payload["model"] == target
+    _, after = http_json(f"{web.url}/api/status")
+    assert after["model"] == target
+    status, payload = http_json(f"{web.url}/api/settings", {"model": "нет-такой-модели"})
+    assert status == 400
+    assert "доступны" in payload["detail"]
+    _, after = http_json(f"{web.url}/api/status")
+    assert after["model"] == target
