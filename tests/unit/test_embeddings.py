@@ -12,7 +12,7 @@ import pytest
 import requests
 import responses
 
-from core import config
+from core import config, llama_server
 from core.embeddings import (
     EmbeddingsError,
     LocalEmbeddings,
@@ -198,12 +198,27 @@ def test_code_provider_needs_a_managed_local_server(monkeypatch):
 
 
 def test_code_provider_uses_the_preset_when_the_server_is_managed(monkeypatch):
-    """Автозапуск включён — сервер поднимает точка входа, и пресет становится моделью векторов."""
+    """Автозапуск включён, сервер отвечает — пресет становится моделью векторов."""
     monkeypatch.setenv("FFAI_LLAMA_AUTOSTART", "1")
     monkeypatch.setattr(config, "LOCAL_API_URL", "http://localhost:1234/v1/chat/completions")
     monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["embed"])
+    # Готовность сервера проверяется отдельно: у процесса планировщика нет объекта сервера, и
+    # недоступный адрес обязан давать названную причину, а не падение сборки индекса.
+    monkeypatch.setattr(llama_server, "is_responding", lambda *args, **kwargs: True)
 
     choice = code_provider()
 
     assert choice.available is True
     assert choice.model == "embed"
+
+
+def test_code_provider_degrades_when_the_server_does_not_answer(monkeypatch):
+    """Сервер под управлением, но не отвечает: векторы не считаются, причина названа."""
+    monkeypatch.setenv("FFAI_LLAMA_AUTOSTART", "1")
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["embed"])
+    monkeypatch.setattr(llama_server, "is_responding", lambda *args, **kwargs: False)
+
+    choice = code_provider()
+
+    assert choice.available is False
+    assert "не отвечает" in choice.reason
