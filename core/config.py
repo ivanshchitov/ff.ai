@@ -84,6 +84,7 @@ def project_paths(root: Path) -> Dict[str, Path]:
         "schedule": _env_path("FFAI_SCHEDULE_FILE", base / "schedule.json"),
         "tasks_dir": _env_path("FFAI_TASKS_DIR", base / "tasks"),
         "exports_dir": _env_path("FFAI_EXPORTS_DIR", base / "reports"),
+        "changes_dir": _env_path("FFAI_CHANGES_DIR", base / "changes"),
     }
 
 

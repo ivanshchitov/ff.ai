@@ -376,3 +376,18 @@ def test_store_write_error_is_visible(tmp_path: Path):
     store.path.parent.write_text("файл вместо каталога", encoding="utf-8")
     store.save(_planned())
     assert "не сохранено" in store.last_error
+
+
+def test_change_metadata_roundtrip_and_legacy_defaults(tmp_path):
+    store = task_state.TaskStore(tmp_path / 'task.json')
+    state = task_state.add_task(task_state.TaskState(), 'update docs')
+    state = task_state.record_patch(state, TaskPatch(1, 'diff', 'docs', True, change_id='a' * 16, rolled_back=True))
+    store.save(state)
+    restored = store.load().current.patch_for(1)
+    assert restored.change_id == 'a' * 16 and restored.rolled_back
+    raw = __import__('json').loads(store.path.read_text())
+    raw['tasks'][0]['patches'][0].pop('change_id')
+    raw['tasks'][0]['patches'][0].pop('rolled_back')
+    store.path.write_text(__import__('json').dumps(raw))
+    restored = store.load().current.patch_for(1)
+    assert restored.change_id == '' and not restored.rolled_back

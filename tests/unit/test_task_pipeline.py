@@ -76,6 +76,7 @@ def _pipeline(repo: Path, tmp_path: Path, ask, **kwargs) -> task_pipeline.TaskPi
         store=TaskStore(tmp_path / "task.json"),
         ask=ask,
         tasks_dir=tmp_path / "tasks",
+        confirm=lambda *_: True,
         **kwargs,
     )
 
@@ -405,3 +406,15 @@ def test_applied_item_keeps_its_mark_after_a_review_round(repo: Path, tmp_path: 
     assert pipeline.state.current.patch_for(applied_index) is not None
     assert pipeline.state.current.patch_for(applied_index).applied is True
     assert task_state.next_item_index(pipeline.state.current) != applied_index
+
+
+def test_standalone_pipeline_requires_explicit_patch_confirmation(repo, tmp_path):
+    pipeline = task_pipeline.TaskPipeline(domain=load_domain('aurora-qt5'), root=repo,
+                                         store=TaskStore(tmp_path / 'standalone.json'),
+                                         ask=FakeAsk(PLAN, PATCH), tasks_dir=tmp_path / 'tasks')
+    before = (repo / 'notes.txt').read_bytes()
+    _approved(pipeline)
+    pipeline.step()
+    assert not pipeline.state.current.patch_for(1).applied
+    assert pipeline.state.current.patch_for(1).change_id
+    assert (repo / 'notes.txt').read_bytes() == before

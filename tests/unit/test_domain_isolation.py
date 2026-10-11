@@ -6,6 +6,7 @@
 """
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -42,7 +43,7 @@ def test_core_does_not_read_stdin_or_print():
         if path.parent.name != "core":
             continue
         assert "sys.stdin" not in text, f"{path.name}: ядро читает стандартный ввод"
-        assert "print(" not in text, f"{path.name}: ядро печатает в стандартный вывод"
+        assert not re.search(r"\bprint\s*\(", text), f"{path.name}: ядро печатает в стандартный вывод"
 
 
 def test_domain_identifier_helper_includes_platform_and_stems():

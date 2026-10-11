@@ -50,6 +50,7 @@ def isolated_state(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("FFAI_SCHEDULE_FILE", str(state / "schedule.json"))
     monkeypatch.setenv("FFAI_TASKS_DIR", str(state / "tasks"))
     monkeypatch.setenv("FFAI_EXPORTS_DIR", str(state / "reports"))
+    monkeypatch.setenv("FFAI_CHANGES_DIR", str(state / "changes"))
     monkeypatch.delenv("FFAI_INDEX_FILE", raising=False)
     # Автозапуск локальной модели выключен: llama-server установлен на машине, и юнит-прогон
     # с автозапуском поднимал бы настоящую модель.

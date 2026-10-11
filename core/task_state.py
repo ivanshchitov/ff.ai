@@ -86,6 +86,8 @@ class TaskPatch:
     summary: str
     applied: bool = False
     reason: str = ""
+    change_id: str = ""
+    rolled_back: bool = False
 
     @property
     def recorded(self) -> bool:
@@ -680,6 +682,8 @@ def _task_to_dict(task: TaskItem) -> Dict[str, object]:
                 "summary": patch.summary,
                 "applied": patch.applied,
                 "reason": patch.reason,
+                "change_id": patch.change_id,
+                "rolled_back": patch.rolled_back,
             }
             for patch in task.patches
         ],
@@ -728,6 +732,8 @@ def _task_from_dict(raw: Dict[str, object]) -> TaskItem:
                     summary=str(entry.get("summary", "")),
                     applied=bool(entry.get("applied", False)),
                     reason=str(entry.get("reason", "")),
+                    change_id=str(entry.get("change_id", "")),
+                    rolled_back=bool(entry.get("rolled_back", False)),
                 )
             )
     issues = []

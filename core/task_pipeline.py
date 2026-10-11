@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from . import config, domain_checks, patches, task_state
 from .api_client import AnswerMeta, APIError
 from .domains import Domain
+from .project_changes import ProjectChanges, ChangeError
 from .task_state import Stage, TaskIssue, TaskItem, TaskPatch, TaskState
 
 PLAN_ASSET = "task_plan_prompt.md"
@@ -152,6 +153,8 @@ class TaskPipeline:
         prepare: Optional[Callable[[int, str], TaskPatch]] = None,
         build: Optional[Callable[[str], Tuple[bool, str]]] = None,
         tasks_dir: Optional[Path] = None,
+        changes: Optional[ProjectChanges] = None,
+        confirm: Optional[Callable[[str, str], bool]] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -161,6 +164,8 @@ class TaskPipeline:
         self._build = build
         self.tasks_dir = Path(tasks_dir or config.TASKS_DIR)
         self.state = self.store.load()
+        self.changes = changes or ProjectChanges(self.root, validate=self._check_change)
+        self._confirm = confirm
 
     # --- состояние --------------------------------------------------------------------------
 
@@ -393,31 +398,22 @@ class TaskPipeline:
     # --- запросы -----------------------------------------------------------------------------
 
     def _default_prepare(self, index: int, patch_text: str) -> TaskPatch:
-        """Готовит патч без подтверждения: применяет, если детерминированные проверки прошли.
+        """Standalone execution uses the same journal and requires explicit approval."""
+        try:
+            task = self.state.current
+            record = self.changes.prepare(patch_text, task.number if task else None)
+            result = self.changes.apply(record.id, self._confirm)
+            return TaskPatch(index, patch_text, patches.parse(patch_text).summary(),
+                             result.ok, result.reason, record.id)
+        except (ChangeError, patches.PatchError, OSError) as error:
+            return TaskPatch(index, patch_text, "", False, str(error))
 
-        Так конвейер остаётся работоспособным без терминала (тесты и библиотечное использование);
-        приложение подставляет сюда проверку с вопросом пользователю.
-        """
+    def _check_change(self, patch_text: str) -> str:
         checks = getattr(self.domain, "checks", None)
         if checks is not None:
-            result = domain_checks.check_patch(patch_text, self.root, checks)
-            if not result.ok:
-                return TaskPatch(
-                    index=index,
-                    text=patch_text,
-                    summary=patches.parse(patch_text).summary(),
-                    applied=False,
-                    reason="; ".join(issue.line() for issue in result.issues),
-                )
-        reason = patches.apply(self.root, patch_text)
-        summary = patches.parse(patch_text).summary()
-        return TaskPatch(
-            index=index,
-            text=patch_text,
-            summary=summary,
-            applied=not reason,
-            reason=reason,
-        )
+            result = domain_checks.check_patch(patch_text, self.root, domain_checks.without_build(checks))
+            return "; ".join(issue.line() for issue in result.issues)
+        return patches.check(self.root, patch_text)
 
     def _request(
         self,

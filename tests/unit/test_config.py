@@ -18,6 +18,7 @@ _STATE_VARIABLES = (
     "FFAI_SCHEDULE_FILE",
     "FFAI_TASKS_DIR",
     "FFAI_EXPORTS_DIR",
+    "FFAI_CHANGES_DIR",
     "FFAI_INDEX_FILE",
 )
 
@@ -187,3 +188,11 @@ def test_session_stores_state_under_the_project(tmp_path: Path):
     assert session._history.path == expected["history"]
     assert session._task_store.path == expected["task"]
     assert session._agent.long_term.path == expected["memory"]
+
+
+def test_changes_path_is_lazy_and_per_project(load_config, monkeypatch, tmp_path):
+    cfg = load_config()
+    assert cfg.project_paths(tmp_path / 'a')['changes_dir'] != cfg.project_paths(tmp_path / 'b')['changes_dir']
+    override = tmp_path / 'isolated-changes'
+    monkeypatch.setenv('FFAI_CHANGES_DIR', str(override))
+    assert cfg.project_paths(tmp_path / 'a')['changes_dir'] == override

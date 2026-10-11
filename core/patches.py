@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import re
+import ast
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,8 @@ class ParsedFile:
     added: Tuple[str, ...] = ()
     removed: Tuple[str, ...] = ()
     is_new: bool = False
+    old_path: str = ""
+    new_path: str = ""
 
     @property
     def added_lines(self) -> int:
@@ -74,6 +78,15 @@ class ParsedPatch:
 def _clean_path(raw: str) -> str:
     """Путь из заголовка патча без префиксов git и без служебного «/dev/null»."""
     path = raw.strip().split("\t", 1)[0].strip()
+    if path.startswith('"'):
+        try:
+            path = ast.literal_eval(path)
+            if re.search(r"\\[0-7]{3}", raw):
+                path = path.encode("latin1").decode("utf-8")
+        except (ValueError, SyntaxError, UnicodeError) as error:
+            raise PatchError("неверный quoted-путь") from error
+    if not isinstance(path, str) or any(ord(c) < 32 for c in path):
+        raise PatchError("недопустимый путь")
     if path in ("/dev/null", ""):
         return ""
     for prefix in ("a/", "b/"):
@@ -96,9 +109,10 @@ def parse(text: str) -> ParsedPatch:
     added: List[str] = []
     removed: List[str] = []
     in_hunk = False
+    old_path = new_path = ""
 
     def flush() -> None:
-        nonlocal current_path, added, removed, is_new
+        nonlocal current_path, added, removed, is_new, old_path, new_path
         if current_path:
             files.append(
                 ParsedFile(
@@ -106,9 +120,12 @@ def parse(text: str) -> ParsedPatch:
                     added=tuple(added),
                     removed=tuple(removed),
                     is_new=is_new,
+                    old_path=old_path,
+                    new_path=new_path,
                 )
             )
         current_path, added, removed, is_new = None, [], [], False
+        old_path = new_path = ""
 
     for line in text.splitlines():
         old = _OLD_PATH_RE.match(line)
@@ -141,6 +158,58 @@ def parse(text: str) -> ParsedPatch:
     if not files:
         raise PatchError("в патче нет ни одного файла")
     return ParsedPatch(files=tuple(files))
+
+
+def validate_text_patch(text: str, root: Path) -> ParsedPatch:
+    """Validate every header before git interprets it; permit text edits only."""
+    if re.search(r"^(GIT binary patch|Binary files |rename |copy |similarity index|.*mode (120000|160000))", text, re.M):
+        raise PatchError("binary, rename, copy и symlink-патчи не поддерживаются")
+    parsed = parse(text)
+    headers = []
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            raw = line[len("diff --git "):]
+            if raw.startswith('"'):
+                # Retain C-style escaping for the common path decoder.
+                names = re.findall(r'"(?:\\.|[^"\\])*"|\S+', raw)
+            else:
+                match = re.fullmatch(r"(a/.*) (b/.*)", raw)
+                names = list(match.groups()) if match else shlex.split(raw)
+            if len(names) != 2:
+                raise PatchError("неверный diff --git")
+            headers.extend(_clean_path(name) for name in names)
+        elif line.startswith(("--- ", "+++ ")):
+            headers.append(_clean_path(line[4:]))
+    for item in parsed.files:
+        if item.old_path and item.new_path and item.old_path != item.new_path:
+            raise PatchError("переименование не поддерживается")
+        if not item.added and not item.removed:
+            raise PatchError("нужен текстовый патч")
+    for name in headers:
+        if name:
+            safe_path(root, name)
+            if name not in parsed.paths:
+                raise PatchError("заголовки патча называют разные файлы")
+    return parsed
+
+
+def safe_path(root: Path, name: str) -> Path:
+    """Reject traversal, Git internals and all symlinks, including internal links."""
+    relative = Path(name)
+    if not name or relative.is_absolute() or any(p in ("..", ".git") for p in relative.parts):
+        raise PatchError("путь вне проекта или служебный путь: " + name)
+    current = Path(root).resolve()
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise PatchError("символьная ссылка: " + name)
+    try:
+        ensure_inside(current, Path(root).resolve())
+    except PathOutsideRepoError as error:
+        raise PatchError(str(error)) from error
+    if current.exists() and not current.is_file():
+        raise PatchError("нужен обычный файл: " + name)
+    return current
 
 
 def outside_root(patch: ParsedPatch, root: Path) -> Tuple[str, ...]:

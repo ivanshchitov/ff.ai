@@ -32,6 +32,7 @@ from . import (
     schedule_store,
     user_profile,
     patches,
+    project_changes,
     reranking,
     task_pipeline,
     task_state,
@@ -199,6 +200,12 @@ class AssistantSession:
             schedule=schedule_store.ScheduleStore(self._project_paths["schedule"]),
         )
         self._task_store = task_state.TaskStore(self._project_paths["task"])
+        self._changes = project_changes.ProjectChanges(self.root, self._project_paths["changes_dir"], validate=self._check_project_change)
+        self._change_recovery_error = ""
+        try:
+            self._changes.recover()
+        except (project_changes.ChangeError, OSError) as error:
+            self._change_recovery_error = str(error)
         self._pipeline = task_pipeline.TaskPipeline(
             domain=self._selection.domain,
             root=self.root,
@@ -208,6 +215,7 @@ class AssistantSession:
             build=self._task_build,
             # Отчёты задачи пишутся в поддерево проекта, а не в общий каталог состояния.
             tasks_dir=self._project_paths["tasks_dir"],
+            changes=self._changes,
         )
         # Каталог выгрузок читает серверный процесс: он получает его из окружения приложения.
         os.environ.setdefault("FFAI_EXPORTS_DIR", str(self._project_paths["exports_dir"]))
@@ -975,58 +983,23 @@ class AssistantSession:
         finally:
             hub.close()
 
-    def _task_prepare(self, index: int, patch_text: str) -> task_state.TaskPatch:
-        """Готовит патч к записи: проверки домена, подтверждение пользователя, применение.
-
-        Порядок именно такой: непроверенный патч не показывается как «можно применять», а
-        непринятый не трогает файлы вовсе.
-        """
+    def _check_project_change(self, patch_text: str) -> str:
         checks = getattr(self.domain, "checks", None)
-        summary = ""
+        if checks is None:
+            return patches.check(self.root, patch_text)
+        result = domain_checks.check_patch(patch_text, self.root, domain_checks.without_build(checks))
+        return "; ".join(issue.line() for issue in result.issues)
+
+    def _task_prepare(self, index: int, patch_text: str) -> task_state.TaskPatch:
+        """All task writes pass through the durable, confirmed project change gate."""
         try:
-            summary = patches.parse(patch_text).summary()
-        except patches.PatchError as error:
-            return task_state.TaskPatch(
-                index=index, text=patch_text, summary="", applied=False, reason=str(error)
-            )
-        if checks is not None:
-            # На этапе выполнения проверяются правила содержимого и применение: сборку запускает
-            # этап проверки, а не каждый патч.
-            result = domain_checks.check_patch(
-                patch_text, self.root, domain_checks.without_build(checks)
-            )
-            if not result.ok:
-                return task_state.TaskPatch(
-                    index=index,
-                    text=patch_text,
-                    summary=summary,
-                    applied=False,
-                    reason="; ".join(issue.line() for issue in result.issues),
-                )
-        if self._patch_confirmation is None:
-            return task_state.TaskPatch(
-                index=index,
-                text=patch_text,
-                summary=summary,
-                applied=False,
-                reason="применение не подтверждено",
-            )
-        if not self._patch_confirmation(summary, patch_text):
-            return task_state.TaskPatch(
-                index=index,
-                text=patch_text,
-                summary=summary,
-                applied=False,
-                reason="пользователь отказался применять патч",
-            )
-        reason = patches.apply(self.root, patch_text)
-        return task_state.TaskPatch(
-            index=index,
-            text=patch_text,
-            summary=summary,
-            applied=not reason,
-            reason=reason,
-        )
+            task = self._pipeline.state.current
+            record = self._changes.prepare(patch_text, task.number if task else None)
+            result = self._changes.apply(record.id, self._patch_confirmation)
+            return task_state.TaskPatch(index, patch_text, patches.parse(patch_text).summary(),
+                                        result.ok, result.reason, record.id)
+        except (project_changes.ChangeError, patches.PatchError, OSError) as error:
+            return task_state.TaskPatch(index, patch_text, "", False, str(error))
 
     def _task_command(self, argument: str) -> CommandResult:
         """`/task` — отчёт, `/task add <цель>`, `/task run`, `/task stage <этап>`, `/task stop`."""

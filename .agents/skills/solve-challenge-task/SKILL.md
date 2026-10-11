@@ -29,7 +29,7 @@ description: Use when implementing an AI Advent Challenge day in ff.ai with a re
 Перед записью — `doctor` и сухой прогон. Во время подготовки-only этот навык не записывает экран.
 
 1. Создать временный каталог демо. В отдельном процессе задать FFAI_STATE_DIR и FFAI_CACHE_DIR;
-   переопределить history, memory, profile, task, schedule, tasks, exports, index и другие явные
+   переопределить history, memory, profile, task, schedule, tasks, exports, changes (FFAI_CHANGES_DIR), index и другие явные
    пути FFAI, чтобы они не ссылались на реальные пользовательские данные.
    Не перемещать, не очищать и не восстанавливать пользовательские файлы; каталог удалить
    только после завершения собственного демо-процесса и рекордера.

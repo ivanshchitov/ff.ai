@@ -153,6 +153,7 @@ class AppSession:
             "FFAI_SCHEDULE_FILE": str(schedule_file if schedule_file is not None else state / "schedule.json"),
             "FFAI_TASKS_DIR": str(tasks_dir if tasks_dir is not None else state / "tasks"),
             "FFAI_EXPORTS_DIR": str(exports_dir if exports_dir is not None else state / "reports"),
+            "FFAI_CHANGES_DIR": str(state / "changes"),
             "FFAI_INDEX_FILE": str(index_file if index_file is not None else cache / "index.sqlite3"),
         }
         if domain is not None:
