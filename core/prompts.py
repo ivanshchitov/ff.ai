@@ -144,6 +144,9 @@ def code_state_message(report: object) -> Optional[str]:
     поиска всегда проговаривается модели.
     """
     status = str(getattr(report, "status", "") or "")
+    if status == "stale":
+        return ('Индекс проекта stale: ' + str(getattr(report, 'error', ''))
+                + '. Старые фрагменты не используй. Читай текущие файлы или предложи /rag-code index.')
     if status == "unavailable":
         error = str(getattr(report, "error", "") or "причина неизвестна")
         return (

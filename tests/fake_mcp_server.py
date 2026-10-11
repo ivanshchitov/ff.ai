@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
 
 if TYPE_CHECKING:  # только для аннотаций: импорт `mcp` отложен до перезапуска в .venv
+    from mcp.types import ToolAnnotations
     from mcp.server.mcpserver import MCPServer
 
 SERVER_NAME = "fake-mcp"
@@ -77,6 +78,7 @@ def build_server(log_level: str = "INFO", empty: bool = False, second: bool = Fa
     """Сервер с инструментами заглушки; `empty=True` — совсем без инструментов."""
     # Импорт внутри функции, а не сверху модуля: перезапуск в `.venv` должен случиться раньше,
     # иначе системный `python3` (3.9, без `mcp`) падает на импорте до всякой логики.
+    from mcp.types import ToolAnnotations
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
 
@@ -92,34 +94,34 @@ def build_server(log_level: str = "INFO", empty: bool = False, second: bool = Fa
     if second:
         # Второй сервер заглушки: другой набор имён, чтобы сквозной тест автовызова мог проверить
         # маршрутизацию шага между серверами и перенаправление неверно названного сервера.
-        @server.tool()
+        @server.tool(annotations=ToolAnnotations(read_only_hint=True))
         def fake_facts(topic: str) -> str:
             """Возвращает факт по теме: инструмент второго сервера для раундов флоу."""
             return f"тема: {topic}; факт: проверено заглушкой"
 
-        @server.tool()
+        @server.tool(annotations=ToolAnnotations(read_only_hint=True))
         def fake_report(text: str) -> str:
             """Принимает текст и подтверждает приём: результат-подтверждение, а не данные."""
             return f"принято: {len(text)} символов"
 
         return server
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     def fake_echo(message: str) -> str:
         """Возвращает переданный текст: инструмент проверки соединения."""
         return message
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     def fake_sum(a: int, b: int) -> str:
         """Складывает два целых числа: проверка параметров схемы инструмента."""
         return str(a + b)
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     def fake_note(text: str) -> str:
         """Возвращает текст как есть, вместе с символами rich-разметки: проверка экранирования."""
         return text
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     def fake_fail(reason: str = "нарочная ошибка") -> str:
         """Всегда отдаёт ошибочный результат с переданной причиной: проверка признака ошибки."""
         raise ToolError(reason)

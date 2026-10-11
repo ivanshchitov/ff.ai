@@ -88,6 +88,7 @@ def test_server_lists_its_tools(repo: Path, tools_file: Path, exports_dir: Path)
     assert all(tool.input_schema.get("type") == "object" for tool in tools)
     read = next(tool for tool in tools if tool.name == "repo_read")
     assert "path" in read.input_schema["required"]
+    assert {tool.name for tool in tools if getattr(tool.annotations, "read_only_hint", False)} == {"repo_tree", "repo_read", "repo_search", "repo_git"}
 
 
 def test_read_call_returns_numbered_lines(repo: Path, tools_file: Path, exports_dir: Path):

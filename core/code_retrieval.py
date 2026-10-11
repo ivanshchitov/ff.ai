@@ -38,6 +38,7 @@ STATUS_NO_MATCHES = "no_matches"
 STATUS_RERANK_FAILED = "rerank_failed"
 STATUS_UNAVAILABLE = "unavailable"
 STATUS_DISABLED = "disabled"
+STATUS_STALE = "stale"
 
 CODE_QUERY_ASSET = "code_query_prompt.md"
 CODE_RERANK_ASSET = "code_rerank_prompt.md"
@@ -214,6 +215,13 @@ class CodeRetriever:
         self._embedding = embedding
         self._choice: Optional[embeddings.EmbeddingChoice] = None
         self.ranking = ranking
+        self.stale_reason = ''
+
+    def invalidate(self, reason: str = 'проект изменился — пересоберите /rag-code index') -> None:
+        self.stale_reason = reason
+
+    def refreshed(self) -> None:
+        self.stale_reason = ''
 
     @property
     def embedding_choice(self) -> embeddings.EmbeddingChoice:
@@ -262,6 +270,8 @@ class CodeRetriever:
             after=after,
             database=self.database,
         )
+        if self.stale_reason:
+            return CodeReport(query=question, status=STATUS_STALE, error=self.stale_reason, **settings)
         if mode not in MODES:
             return CodeReport(
                 query=question,

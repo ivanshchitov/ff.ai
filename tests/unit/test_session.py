@@ -765,3 +765,58 @@ def test_changes_commands_confirm_undo_and_pause_task(repo):
     assert session.task_step() is None
     unknown = session.run_command('/changes undo unknown')
     assert 'id' in '\n'.join(unknown.lines)
+
+
+def test_applied_and_undone_changes_keep_index_stale_across_restart(repo, tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / 'README.md').write_text('old documentation\n')
+    database = tmp_path / 'index.sqlite3'
+    monkeypatch.setenv('FFAI_INDEX_FILE', str(database))
+    code_index.build_index(repo, CORPUS, 'structural', database)
+    session = _session(repo, code_retriever=code_retrieval.CodeRetriever(database, CORPUS))
+    session.set_patch_confirmation(lambda *_: True)
+    patch = session._task_prepare(1, '--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old documentation\n+new documentation\n')
+    assert patch.applied
+    restarted = _session(repo, code_retriever=code_retrieval.CodeRetriever(database, CORPUS))
+    assert 'stale' in '\n'.join(restarted.run_command('/rag-code status').lines)
+    assert restarted._code_retriever.search('old', mode='baseline').status == code_retrieval.STATUS_STALE
+    restarted.run_command('/rag-code index')
+    assert not restarted._code_retriever.stale_reason
+    restarted.set_patch_confirmation(lambda *_: True)
+    restarted.run_command('/changes undo ' + patch.change_id)
+    assert restarted._code_retriever.stale_reason
+    before = database.read_bytes()
+    monkeypatch.setattr(code_index, 'build_index', lambda *_: (_ for _ in ()).throw(code_index.CodeIndexError('simulated rebuild failure')))
+    result = restarted.run_command('/rag-code index')
+    assert 'simulated rebuild failure' in '\n'.join(result.lines)
+    assert database.read_bytes() == before and restarted._code_retriever.stale_reason
+
+
+@pytest.mark.parametrize('text, expected', [('код возврата: 1\ncompiler failed', False), ('код возврата: 0\nbuilt', True)])
+def test_task_build_uses_command_exit_status(repo, monkeypatch, text, expected):
+    from types import SimpleNamespace
+    from core.mcp_client import MCPTool
+    from core.mcp_tools import ToolServerView
+    session = _session(repo)
+    tool = session.domain.checks.build_tool
+    hub = SimpleNamespace(views=lambda: (ToolServerView('local', (MCPTool(tool),)),),
+                          call=lambda *_: SimpleNamespace(is_error=False, text=text), close=lambda: None)
+    monkeypatch.setattr(session, '_tool_hub', lambda: hub)
+    monkeypatch.setattr(session, 'ops_pipeline', lambda: None)
+    assert session._task_build('qmake')[0] is expected
+
+
+def test_task_build_missing_oauth_prerequisite_is_unavailable(repo, monkeypatch):
+    from types import SimpleNamespace
+    from core import domain_checks
+    from core.mcp_client import MCPTool
+    from core.mcp_tools import ToolServerView
+    session = _session(repo)
+    tool = session.domain.checks.build_tool
+    hub = SimpleNamespace(views=lambda: (ToolServerView('local', (MCPTool(tool),)),),
+                          call=lambda *_: SimpleNamespace(is_error=False, text='код возврата: 3\nProject ERROR: CLIENT_ID required'), close=lambda: None)
+    monkeypatch.setattr(session, '_tool_hub', lambda: hub)
+    monkeypatch.setattr(session, 'ops_pipeline', lambda: None)
+    with pytest.raises(domain_checks.BuildUnavailable, match='CLIENT_ID'):
+        session._task_build('qmake')

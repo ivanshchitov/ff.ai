@@ -418,3 +418,24 @@ def test_standalone_pipeline_requires_explicit_patch_confirmation(repo, tmp_path
     assert not pipeline.state.current.patch_for(1).applied
     assert pipeline.state.current.patch_for(1).change_id
     assert (repo / 'notes.txt').read_bytes() == before
+
+
+def test_validation_ignores_unrelated_user_work_and_sees_check_results(repo, tmp_path):
+    from core.task_context import TaskContextProvider
+    (repo / 'unrelated.cpp').write_text('int value;\n')
+    subprocess.run(['git', '-C', str(repo), 'add', 'unrelated.cpp'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'extra'], check=True)
+    (repo / 'unrelated.cpp').write_text('#include <QtWidgets>\n')
+    ask = FakeAsk(PLAN, PATCH, '--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+documentation\n', REVIEW_OK)
+    pipeline = _pipeline(repo, tmp_path, ask, build=lambda _: (True, 'build output marker'))
+    _approved(pipeline)
+    pipeline.step()
+    pipeline.step()
+    pipeline.step()
+    pipeline.step()
+    validation = next(messages for phase, messages, _ in ask.calls if phase == 'task_validate')
+    text = '\n'.join(m['content'] for m in validation)
+    assert 'build output marker' in text
+    assert 'unrelated.cpp' not in text
+    assert 'третья строка' in text
+    assert pipeline.state.current.status == task_state.TASK_STATUS_DONE

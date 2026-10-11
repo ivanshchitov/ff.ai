@@ -22,6 +22,7 @@ from core.mcp_client import MCPCallResult, MCPConnection, MCPServerSpec, MCPTool
 def _tool(name: str, description: str = "Описание") -> MCPTool:
     return MCPTool(
         name=name,
+        read_only=True,
         description=description,
         input_schema={"properties": {"query": {"type": "string"}}, "required": ["query"]},
     )
@@ -450,3 +451,16 @@ def test_tool_message_sits_above_the_dialogue_turns(tmp_path: Path):
     )
     first_user = roles.index("user")
     assert tool_index < first_user, "результаты инструментов идут выше реплик диалога"
+
+
+def test_ask_never_executes_a_hidden_write_tool(tmp_path):
+    from dataclasses import replace
+    hub = FakeHub({'repo': ('repo_search', 'dangerous_write')})
+    connection = hub.connections[0]
+    hub.connections = (replace(connection, tools=tuple(replace(t, read_only=False) if t.name == 'dangerous_write' else t for t in connection.tools)),) + hub.connections[1:]
+    client = FakeClient('Ответ без изменений.', choices=[_chain(_step(1, 'dangerous_write', {'path':'source.cpp'}))])
+    agent = _agent(tmp_path, client, hub)
+    agent.ask('почему ошибка? ничего не меняй')
+    assert hub.calls == []
+    catalog = '\n'.join(m['content'] for m in client.calls[0])
+    assert 'dangerous_write' not in catalog

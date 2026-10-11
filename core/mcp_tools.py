@@ -99,6 +99,13 @@ class ToolServerView:
     error: Optional[str] = None
 
 
+def read_only_views(reports) -> Tuple[ToolServerView, ...]:
+    """Unknown permissions fail closed; names remain server-owned data."""
+    return tuple(ToolServerView(view.spec_name,
+                               tuple(t for t in view.tools if getattr(t, 'read_only', False)),
+                               view.error) for view in reports)
+
+
 def views(
     specs: Sequence[MCPServerSpec], connections: Sequence[MCPConnection]
 ) -> Tuple[ToolServerView, ...]:

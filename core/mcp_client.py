@@ -84,6 +84,7 @@ class MCPTool:
     name: str
     description: str = ""
     input_schema: Dict[str, Any] = field(default_factory=dict)
+    read_only: bool = False
 
     def parameters(self) -> List[MCPParameter]:
         """Параметры схемы; чужая схема может быть какой угодно, поэтому разбор защитный."""
@@ -309,6 +310,7 @@ class MCPClient:
                     # Модели mcp 2.x — snake_case (`input_schema`, `is_error`); на проводе
                     # они отдаются как inputSchema, но библиотека переводит их сама.
                     input_schema=dict(getattr(item, "input_schema", None) or {}),
+                    read_only=getattr(getattr(item, "annotations", None), "read_only_hint", None) is True,
                 )
                 for item in getattr(listing, "tools", ()) or ()
             )

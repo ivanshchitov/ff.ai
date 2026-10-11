@@ -588,3 +588,10 @@ def test_russian_question_retrieves_local_markdown(tmp_path):
     assert report.fragments
     assert report.fragments[0].identifier.startswith("README.md:L")
     assert "токена доступа" in report.fragments[0].text
+
+
+def test_stale_index_does_not_deliver_old_fragments(retriever):
+    retriever.invalidate('project changed')
+    report = retriever.search('ModelList', mode='baseline')
+    assert report.status == code_retrieval.STATUS_STALE
+    assert not report.fragments and 'project changed' in report.error

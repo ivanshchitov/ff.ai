@@ -166,6 +166,7 @@ def test_stdio_server_lists_tools_with_parameters():
     assert {"fake_echo", "fake_sum", "fake_note", "fake_fail"} <= names
     echo = next(tool for tool in connection.tools if tool.name == "fake_echo")
     assert echo.description
+    assert echo.read_only
     assert [item.name for item in echo.parameters()] == ["message"]
     assert echo.parameters()[0].required
 

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ from . import (
     reranking,
     task_pipeline,
     task_state,
+    task_context,
 )
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
@@ -206,6 +208,11 @@ class AssistantSession:
             self._changes.recover()
         except (project_changes.ChangeError, OSError) as error:
             self._change_recovery_error = str(error)
+        self._task_context = task_context.TaskContextProvider(
+            self.root, self.domain, retrieve=self._retrieve_task_code,
+            read_flow=self._read_task_flow,
+            stale=lambda: bool(getattr(self._code_retriever, 'stale_reason', '')),
+        )
         self._pipeline = task_pipeline.TaskPipeline(
             domain=self._selection.domain,
             root=self.root,
@@ -216,6 +223,7 @@ class AssistantSession:
             # Отчёты задачи пишутся в поддерево проекта, а не в общий каталог состояния.
             tasks_dir=self._project_paths["tasks_dir"],
             changes=self._changes,
+            context=self._task_context,
         )
         for record in self._changes.list() if not self._change_recovery_error else ():
             if record.status == 'undone':
@@ -224,6 +232,7 @@ class AssistantSession:
         os.environ.setdefault("FFAI_EXPORTS_DIR", str(self._project_paths["exports_dir"]))
         # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
         self._patch_confirmation: Optional[Callable[[str, str], bool]] = None
+        self._sync_code_freshness()
         # Конвейер операций: исполнитель команд и подтверждение необратимых шагов приходят
         # снаружи — так тесты проверяют решения, не запуская SDK.
         self._ops_runner: Optional[Callable] = None
@@ -326,6 +335,7 @@ class AssistantSession:
         """Задать вопрос. Операция блокирующая: следующий вызов ждёт завершения этого."""
         with self._lock:
             self._require_client()
+            self._sync_code_freshness()
             meta = self._agent.ask(
                 question, on_phase=lambda phase: self._emit(PhaseChanged(phase))
             )
@@ -955,6 +965,34 @@ class AssistantSession:
         self._agent.record_usage(meta)
         return meta
 
+    def _retrieve_task_code(self, question):
+        self._require_client()
+        self._sync_code_freshness()
+        self._agent._retrieve_code(question)
+        return self._agent.code_report()
+
+    def _read_task_flow(self, question):
+        self._require_client()
+        return self._agent._run_tool_flow(question, None)
+
+    def _invalidate_code(self):
+        if hasattr(self._code_retriever, 'invalidate'):
+            self._code_retriever.invalidate()
+        self._agent._code_fragments = ()
+
+    def _sync_code_freshness(self):
+        if not hasattr(self._code_retriever, 'invalidate'):
+            return
+        database = getattr(self._code_retriever, 'database', config.repo_index_file(self.root))
+        indexed = code_index.read_index(database)
+        built_at = indexed.built_at if indexed else 0
+        try:
+            if any(record.changed_at > built_at for record in self._changes.list()):
+                self._invalidate_code()
+        except project_changes.ChangeError as error:
+            self._change_recovery_error = str(error)
+            self._invalidate_code()
+
     def _task_build(self, command: str) -> Tuple[bool, str]:
         """Команда сборки выполняется инструментом сервера репозитория: белый список — там.
 
@@ -980,6 +1018,11 @@ class AssistantSession:
             if route.error:
                 raise domain_checks.BuildUnavailable(route.error)
             result = hub.call(route.server, tool_name, {"command": command})
+            if result.is_error or any(re.search(pattern, result.text) for pattern in checks.build_unavailable_patterns):
+                raise domain_checks.BuildUnavailable(result.text)
+            status = re.search(r'^код возврата:\s*(-?\d+)\s*$', result.text, re.M)
+            if status:
+                return int(status[1]) == 0, result.text
             return (not result.is_error), result.text
         except domain_checks.BuildUnavailable:
             raise
@@ -1001,6 +1044,8 @@ class AssistantSession:
             task = self._pipeline.state.current
             record = self._changes.prepare(patch_text, task.number if task else None)
             result = self._changes.apply(record.id, self._patch_confirmation)
+            if result.ok:
+                self._invalidate_code()
             return task_state.TaskPatch(index, patch_text, patches.parse(patch_text).summary(),
                                         result.ok, result.reason, record.id)
         except (project_changes.ChangeError, patches.PatchError, OSError) as error:
@@ -1022,6 +1067,7 @@ class AssistantSession:
             if len(tokens) == 2 and tokens[0] == 'undo':
                 result = self._changes.undo(tokens[1], self._patch_confirmation)
                 if result.ok:
+                    self._invalidate_code()
                     self._pipeline._save(task_state.rollback_change(self._pipeline.state, result.record.id))
                 return CommandResult('/changes', (f'{result.record.id} — {result.record.status}',
                                                     result.reason or 'Изменение отменено; задача на паузе.'))
@@ -1371,6 +1417,8 @@ class AssistantSession:
                     ),
                 )
             self._last_code_report = report
+            if hasattr(self._code_retriever, 'refreshed'):
+                self._code_retriever.refreshed()
             return CommandResult(command="/rag-code", lines=self.code_lines())
         if action == "compare":
             return CommandResult(command="/rag-code", lines=self._code_compare_lines(corpus))
@@ -1518,6 +1566,8 @@ class AssistantSession:
             f"Файлов: {report.files}; фрагментов: {report.chunks}; "
             f"строк во фрагментах: {report.lines}; объём: {report.size_bytes} симв.",
         ]
+        if getattr(self._code_retriever, 'stale_reason', ''):
+            lines.insert(0, 'Индекс stale — старые фрагменты не используются; пересобрать: /rag-code index.')
         reasons = report.skip_reasons()
         if reasons:
             summary = ", ".join(f"{reason} — {count}" for reason, count in sorted(reasons.items()))
@@ -1642,6 +1692,8 @@ class AssistantSession:
                 return CommandResult(command="/domain", lines=(str(error),))
             self._selection = selection
             self._agent.domain = selection.domain
+            self._pipeline.domain = selection.domain
+            self._task_context.domain = selection.domain
             self._emit(DomainSelected(selection))
             return CommandResult(
                 command="/domain",

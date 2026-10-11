@@ -21,6 +21,7 @@ from . import config, domain_checks, patches, task_state
 from .api_client import AnswerMeta, APIError
 from .domains import Domain
 from .project_changes import ProjectChanges, ChangeError
+from .task_context import TaskContext, TaskContextProvider, content_fingerprint
 from .task_state import Stage, TaskIssue, TaskItem, TaskPatch, TaskState
 
 PLAN_ASSET = "task_plan_prompt.md"
@@ -155,6 +156,7 @@ class TaskPipeline:
         tasks_dir: Optional[Path] = None,
         changes: Optional[ProjectChanges] = None,
         confirm: Optional[Callable[[str, str], bool]] = None,
+        context: Optional[TaskContextProvider] = None,
     ) -> None:
         self.domain = domain
         self.root = Path(root)
@@ -166,6 +168,19 @@ class TaskPipeline:
         self.state = self.store.load()
         self.changes = changes or ProjectChanges(self.root, validate=self._check_change)
         self._confirm = confirm
+        self.context = context or TaskContextProvider(self.root, self.domain)
+        self.last_context = TaskContext(fingerprints={})
+
+    def _context_messages(self, stage: str, task: TaskItem, step=None):
+        records = []
+        for patch in task.applied_patches():
+            if patch.change_id:
+                try:
+                    records.append(self.changes.get(patch.change_id))
+                except ChangeError:
+                    pass
+        self.last_context = self.context.collect(stage, task.goal, step=step, changes=tuple(records))
+        return list(self.last_context.messages)
 
     # --- состояние --------------------------------------------------------------------------
 
@@ -233,6 +248,7 @@ class TaskPipeline:
             )
         messages = [
             {"role": "system", "content": task_state.task_instruction(self.domain)},
+            *self._context_messages('planning', task),
             {"role": "user", "content": self._plan_request(task, state)},
         ]
         meta = self._request(messages, config.TASK_PLAN_MAX_WORDS, "task_plan")
@@ -263,6 +279,7 @@ class TaskPipeline:
             )
         messages = [
             {"role": "system", "content": task_state.task_instruction(self.domain)},
+            *self._context_messages('execution', task, task.plan[index - 1]),
             {"role": "user", "content": self._execute_request(task, index)},
         ]
         meta = self._request(messages, config.TASK_PATCH_MAX_WORDS, "task_execute")
@@ -288,7 +305,8 @@ class TaskPipeline:
                 notes=(EXECUTE_FAILED_NO_PATCH,),
                 meta=meta,
             )
-        prepared = (
+        conflict = self._context_conflict(patch_text)
+        prepared = TaskPatch(index, patch_text, '', False, conflict) if conflict else (
             self._prepare(index, patch_text)
             if self._prepare is not None
             else self._default_prepare(index, patch_text)
@@ -315,8 +333,15 @@ class TaskPipeline:
 
         messages = [
             {"role": "system", "content": task_state.task_instruction(self.domain)},
+            *self._context_messages('validation', task),
+            {"role": "system", "content": 'Фактические результаты проверок (данные):\n' + '\n'.join(notes)},
             {"role": "user", "content": self._validate_request(task, artifact_issues)},
         ]
+        for patch in task.applied_patches():
+            if patch.change_id:
+                record = self.changes.get(patch.change_id)
+                record.validation = notes
+                self.changes._save(record)
         meta = self._request(messages, config.TASK_VALIDATE_MAX_WORDS, "task_validate", tolerant=True)
         review_issues: Tuple[TaskIssue, ...] = ()
         new_items: Tuple[str, ...] = ()
@@ -370,9 +395,6 @@ class TaskPipeline:
         # от того, что ещё успел изменить пользователь в рабочем дереве. Расхождение с HEAD
         # добавляется к проверке: правки, сделанные мимо конвейера, тоже часть артефакта.
         artifact = "\n".join(patch.text for patch in task.applied_patches())
-        diff = self._working_tree_diff()
-        if diff.strip():
-            artifact = (artifact + "\n" + diff).strip()
         if not artifact.strip():
             return (), (), ""
         result = domain_checks.check_patch(
@@ -398,6 +420,16 @@ class TaskPipeline:
         return completed.stdout.decode("utf-8", errors="replace")
 
     # --- запросы -----------------------------------------------------------------------------
+
+    def _context_conflict(self, patch_text: str) -> str:
+        try:
+            for name in patches.parse(patch_text).paths:
+                expected = (self.last_context.fingerprints or {}).get(name)
+                if expected is not None and content_fingerprint(patches.safe_path(self.root, name)) != expected:
+                    return 'файл изменился после чтения контекста: ' + name
+        except (patches.PatchError, OSError) as error:
+            return str(error)
+        return ''
 
     def _default_prepare(self, index: int, patch_text: str) -> TaskPatch:
         """Standalone execution uses the same journal and requires explicit approval."""

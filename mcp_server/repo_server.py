@@ -37,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 from core import config, domains  # noqa: E402
 from core.repo import RepoRootError, resolve_root  # noqa: E402
 from core.schedule_store import ScheduleStore  # noqa: E402
+from mcp.types import ToolAnnotations
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 
@@ -205,7 +206,7 @@ def _call_job(name: str, arguments: Dict[str, Any]) -> str:
 server = MCPServer(SERVER_NAME, instructions=SERVER_INSTRUCTIONS, log_level="ERROR")
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def repo_tree(pattern: str = "**/*", max_results: int = repo_tools.MAX_TREE_RESULTS) -> str:
     """Перечень файлов репозитория с учётом правил игнорирования git.
 
@@ -216,7 +217,7 @@ def repo_tree(pattern: str = "**/*", max_results: int = repo_tools.MAX_TREE_RESU
     return _call(repo_tools.repo_tree, pattern=pattern, max_results=max_results)
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def repo_read(
     path: str, start_line: Optional[int] = None, end_line: Optional[int] = None
 ) -> str:
@@ -232,7 +233,7 @@ def repo_read(
     )
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def repo_search(
     query: str, glob: Optional[str] = None, max_results: int = repo_tools.MAX_SEARCH_RESULTS
 ) -> str:
@@ -248,7 +249,7 @@ def repo_search(
     )
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def repo_git(args: str) -> str:
     """Git только на чтение: подкоманда обязана быть в белом списке домена.
 

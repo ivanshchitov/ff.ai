@@ -351,8 +351,8 @@ class RepoAgent:
         self._last_tool_flow = None
         if not self.config.auto_tools or hub is None:
             return ()
-        catalog = hub.catalog()
-        if not catalog:
+        catalog = mcp_tools.read_only_views(hub.catalog())
+        if not any(view.tools and not view.error for view in catalog):
             return ()
         try:
             return self._flow_rounds(hub, question, on_phase)
@@ -365,7 +365,7 @@ class RepoAgent:
         self, hub, question: str, on_phase: Optional[Callable[[RequestPhase], None]]
     ) -> Tuple[mcp_tools.ToolStep, ...]:
         """Раунды флоу: запрос выбора, шаги, при `more` — следующий раунд."""
-        views = hub.views()
+        views = mcp_tools.read_only_views(hub.views())
         steps: List[mcp_tools.ToolStep] = []
         results: List[str] = []
         rounds = 0
@@ -451,7 +451,7 @@ class RepoAgent:
             arguments, sources = mcp_tools.resolve_references(choice.arguments, list(results))
         except mcp_tools.ReferenceFailure:
             return None
-        route = mcp_tools.route(views, choice.server, choice.tool)
+        route = mcp_tools.route(mcp_tools.read_only_views(views), choice.server, choice.tool)
         if route.error:
             return None
         rules = tuple(getattr(self.domain, "invariants", ()) or ())

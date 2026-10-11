@@ -46,6 +46,8 @@ class ChangeRecord:
     reason: str = ''
     validation: Tuple[str, ...] = ()
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    changed_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ class ProjectChanges:
         return self.changes_dir / (change_id + '.json')
 
     def _save(self, record: ChangeRecord) -> None:
+        record.updated_at = time.time()
         self.changes_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.changes_dir.chmod(0o700)
         def encode(states):
@@ -183,6 +186,8 @@ class ProjectChanges:
         return tuple(sorted(records, key=lambda r: (r.created_at, r.id)))
 
     def _result(self, record, ok, status, reason=''):
+        if status in ('applied', 'undone') or record.status in ('applying', 'undoing'):
+            record.changed_at = time.time()
         record.status, record.reason = status, reason
         self._save(record)
         return ChangeResult(ok, record, reason)

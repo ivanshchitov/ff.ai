@@ -205,6 +205,7 @@ class DomainChecks:
     build_tool: str = ""
     build_steps: Tuple[str, ...] = ()
     build_description: str = ""
+    build_unavailable_patterns: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -651,6 +652,7 @@ def _load_checks(path: Path) -> Optional[DomainChecks]:
             str(step).strip() for step in raw_build.get("steps", []) if str(step).strip()
         ),
         build_description=str(raw_build.get("description", "")).strip(),
+        build_unavailable_patterns=tuple(str(p) for p in raw_build.get('unavailable_patterns', ())),
     )
 
 
