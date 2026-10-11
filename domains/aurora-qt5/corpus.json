@@ -20,7 +20,8 @@
     ".json",
     ".conf",
     ".ini",
-    ".sh"
+    ".sh",
+    ".md"
   ],
   "exclude_globs": [
     "build",
@@ -42,7 +43,22 @@
     "*.png",
     "*.jpg",
     "*.ico",
-    "*.desktop"
+    "*.desktop",
+    ".env",
+    ".env.*",
+    "*.user",
+    "*.user.*",
+    ".idea",
+    ".vscode",
+    ".agents",
+    ".claude",
+    ".opencode",
+    ".omp",
+    "videos",
+    "logs",
+    "state",
+    ".ffai",
+    ".superpowers"
   ],
   "max_file_bytes": 262144,
   "fixed": {

@@ -26,7 +26,7 @@ def _project(root: Path) -> Path:
     _write(root, "src/main.qml", "import QtQuick 2.0\n\nApplicationWindow {\n    id: window\n}\n")
     _write(root, "rpm/app.spec", "Name: app\nVersion: 1.0\n%build\nqmake\nmake\n")
     _write(root, "build/generated.cpp", "int generated;")
-    _write(root, "src/notes.md", "# заметка")
+    _write(root, "src/notes.txt", "# заметка")
     _write(root, "src/blob.cpp", "int a;\0int b;")
     _write(root, "src/huge.cpp", "// x\n" * 200_000)
     return root
@@ -42,7 +42,7 @@ def test_corpus_keeps_sources_and_explains_skips(tmp_path: Path):
     assert kept == ["rpm/app.spec", "src/main.qml", "src/models.cpp"]
 
     reasons = {item.path: item.reason for item in result.skipped}
-    assert reasons["src/notes.md"] == code_index.SKIP_EXTENSION
+    assert reasons["src/notes.txt"] == code_index.SKIP_EXTENSION
     assert reasons["build/generated.cpp"] == code_index.SKIP_GLOBS
     assert reasons["src/blob.cpp"] == code_index.SKIP_BINARY
     assert reasons["src/huge.cpp"] == code_index.SKIP_TOO_LARGE
@@ -423,3 +423,15 @@ def test_old_schema_index_is_not_read_as_usable(tmp_path: Path):
     assert code_index.read_chunks(database) == ()
     assert code_index.read_vectors(database).model == ""
     assert "пересоберите" in code_index.read_vectors(database).note
+
+
+def test_local_documents_and_api_descriptions_exclude_private_artifacts(tmp_path):
+    included = ["README.md", "docs/design.md", "api/schema.json", "api/routes.yaml"]
+    excluded = [".env.json", ".env", "app.pro.user", ".idea/workspace.json", ".vscode/settings.json", "videos/script.md", "logs/event.json", "state/history.json"]
+    for name in included + excluded:
+        _write(tmp_path, name, "описание проекта\n")
+    result = code_index.scan(tmp_path, CORPUS)
+    assert {p.relative_to(tmp_path).as_posix() for p in result.files} == set(included)
+    chunks = code_index.chunk_file(tmp_path / "docs/design.md", "docs/design.md", CORPUS, "structural")
+    assert chunks[0].text == "описание проекта"
+    assert chunks[0].label == "docs/design.md:L1-L1"

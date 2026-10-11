@@ -576,3 +576,15 @@ def test_unknown_ranking_is_disabled(repository: Path, tmp_path: Path):
 
     assert report.status == code_retrieval.STATUS_DISABLED
     assert "способ ранжирования" in report.error
+
+
+def test_russian_question_retrieves_local_markdown(tmp_path):
+    root = tmp_path / "repo"
+    _write(root, "README.md", "# Авторизация\nАвторизация использует проверку токена доступа.\n")
+    _write(root, "src/render.cpp", "void paint() {}\n")
+    database = tmp_path / "index.sqlite3"
+    code_index.build_index(root, CORPUS, "structural", database)
+    report = code_retrieval.CodeRetriever(database, CORPUS).search("авторизация токена доступа", mode="baseline")
+    assert report.fragments
+    assert report.fragments[0].identifier.startswith("README.md:L")
+    assert "токена доступа" in report.fragments[0].text
