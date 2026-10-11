@@ -27,6 +27,8 @@ class FakeClient:
 
     def ask_with_usage_messages(self, messages, max_tokens=None, temperature=None, model=None):
         self.calls.append({"messages": messages, "model": model})
+        if messages[0]["content"].startswith("Классифицируй"):
+            return AnswerMeta(content='{"kind":"answer","goal":"","clarification":""}', model=model, elapsed_seconds=0.1, prompt_tokens=5, completion_tokens=3, total_tokens=8, cost_usd=0.0)
         rated = rerank_answer(messages, self.rerank_score)
         if rated is not None:
             return AnswerMeta(
@@ -233,3 +235,12 @@ def test_tool_flow_journal_silent_without_steps(tui, recording_console):
     before = recording_console.text
     tui._print_tool_journal()
     assert recording_console.text == before
+
+
+def test_plain_development_chat_starts_existing_task_loop(tui, monkeypatch):
+    from core.session import SubmissionResult
+    requests, runs = [], []
+    monkeypatch.setattr(tui.session, 'submit', lambda text: requests.append(text) or SubmissionResult('task', task_number=1, task_run=True, message='Задача 1 создана.'))
+    monkeypatch.setattr(tui, '_run_task', lambda: runs.append(True))
+    tui._ask('update documentation')
+    assert requests == ['update documentation'] and runs == [True]

@@ -189,8 +189,8 @@ class TaskPipeline:
         self.store.save(state)
         return state
 
-    def add(self, goal: str) -> TaskState:
-        return self._save(task_state.add_task(self.state, goal))
+    def add(self, goal: str, request_id: str = '') -> TaskState:
+        return self._save(task_state.add_task(self.state, goal, request_id))
 
     def stop(self) -> TaskState:
         return self._save(task_state.drop_all(self.state))

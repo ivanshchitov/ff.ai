@@ -29,6 +29,7 @@ from core.docs_retrieval import DocsFragment, DocsReport
 from core.session import (
     Answer,
     AnswerReady,
+    SubmissionResult,
     CommandResult,
     DomainSelected,
     JournalLine,
@@ -137,6 +138,9 @@ class FakeSession:
             listener(event)
 
     # --- операции -------------------------------------------------------------------------
+
+    def submit(self, text, request_id=None):
+        return SubmissionResult('answer', answer=self.ask(text))
 
     def ask(self, question: str) -> Answer:
         self.asked.append(question)
@@ -709,3 +713,23 @@ def test_task_resume_starts_the_runner_again(client: TestClient, session: FakeSe
 
 def test_default_confirmation_timeout_is_generous():
     assert DEFAULT_CONFIRM_TIMEOUT >= 60
+
+
+def test_chat_task_submission_forwards_request_id_and_starts_existing_runner(client, session, app, monkeypatch):
+    seen, starts = [], []
+    def submit(text, request_id=None):
+        seen.append((text, request_id))
+        return SubmissionResult('task', task_number=7, task_run=True, message='Задача 7 создана.')
+    monkeypatch.setattr(session, 'submit', submit)
+    monkeypatch.setattr(app.state.runner, 'start', lambda: starts.append(True))
+    response = client.post('/api/ask', json={'question':'update docs', 'request_id':'request-7'})
+    assert response.status_code == 200
+    assert response.json()['kind'] == 'task' and response.json()['task_number'] == 7
+    assert seen == [('update docs', 'request-7')] and starts == [True]
+
+
+def test_chat_replay_does_not_restart_runner(client, session, app, monkeypatch):
+    monkeypatch.setattr(session, 'submit', lambda *_, **__: SubmissionResult('task', task_number=7, message='Already saved.'))
+    monkeypatch.setattr(app.state.runner, 'start', lambda: pytest.fail('replay starts task'))
+    payload = client.post('/api/ask', json={'question':'update docs', 'request_id':'request-7'}).json()
+    assert payload['task_number'] == 7 and not payload['task_run']

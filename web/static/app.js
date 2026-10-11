@@ -10,6 +10,7 @@
 // тексте распознаётся минимальная разметка. Разметку из чужих данных строить нельзя.
 
 const PHASE_LABELS = {
+  request_routing: "Разбор намерения…",
   request: "Отправка вопроса…",
   compression: "Суммаризация контекста…",
   facts_update: "Обновление фактов…",
@@ -214,7 +215,7 @@ const postJson = (path, body) =>
 
 // --- лента: сообщения, прокрутка --------------------------------------------------------------
 
-const state = { busy: false, stick: true, current: null, confirmations: new Map() };
+const state = { pendingSend: null, busy: false, stick: true, current: null, confirmations: new Map() };
 
 function atBottom() {
   const feed = el("feed");
@@ -371,12 +372,20 @@ async function ask(question) {
   const entry = assistantStart();
   setPhase("Отправка вопроса…");
   try {
-    const payload = await postJson("api/ask", { question });
+    if (!state.pendingSend || state.pendingSend.question !== question) {
+      state.pendingSend = { question, request_id: globalThis.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random().toString(16).slice(2) };
+    }
+    const payload = await postJson("api/ask", state.pendingSend);
+    state.pendingSend = null;
     entry.body.replaceChildren(markup(payload.answer || ""));
     for (const line of payload.journal || []) addJournalTo(entry, line);
     renderMeta(entry, payload.meta);
     renderSources(entry, payload.sources);
     renderCitations(entry, payload.citations);
+    if (payload.kind === "task") {
+      entry.node.dataset.taskNumber = payload.task_number;
+      loadReport("task");
+    }
     if (!payload.answer) entry.bubble.classList.add("error");
   } catch (error) {
     entry.bubble.classList.add("error");

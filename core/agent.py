@@ -56,6 +56,7 @@ class RequestPhase(Enum):
     TASK_PLAN = "task_plan"
     TASK_EXECUTE = "task_execute"
     TASK_VALIDATE = "task_validate"
+    REQUEST_ROUTING = "request_routing"
 
 
 @dataclass

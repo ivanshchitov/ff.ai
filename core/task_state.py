@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -136,6 +138,7 @@ class TaskItem:
     transitions: Tuple[Transition, ...] = ()
     result_path: str = ""
     fail_reason: str = ""
+    request_id: str = ""
 
     @property
     def title(self) -> str:
@@ -323,12 +326,12 @@ def clip_goal(goal: str, limit: int = config.TASK_GOAL_MAX_CHARS) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def add_task(state: TaskState, goal: str) -> TaskState:
+def add_task(state: TaskState, goal: str, request_id: str = '') -> TaskState:
     """Добавляет задачу в очередь: цель обрезается, номер выдаётся по порядку."""
     text = clip_goal(goal)
     if not text:
         return state
-    task = TaskItem(number=state.next_number, goal=text)
+    task = TaskItem(number=state.next_number, goal=text, request_id=request_id)
     return replace(state, tasks=state.tasks + (task,), next_number=state.next_number + 1)
 
 
@@ -665,10 +668,15 @@ class TaskStore:
         self.last_error = ""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(_state_to_dict(state), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            fd, temporary = tempfile.mkstemp(prefix='.task-', dir=self.path.parent)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    json.dump(_state_to_dict(state), stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
         except OSError as error:
             self.last_error = f"состояние задачи не сохранено: {error}"
 
@@ -721,6 +729,7 @@ def _task_to_dict(task: TaskItem) -> Dict[str, object]:
         ],
         "result_path": task.result_path,
         "fail_reason": task.fail_reason,
+        "request_id": task.request_id,
     }
 
 
@@ -792,6 +801,7 @@ def _task_from_dict(raw: Dict[str, object]) -> TaskItem:
         transitions=tuple(transitions)[-config.MAX_TRANSITION_LOG :],
         result_path=str(raw.get("result_path", "")),
         fail_reason=str(raw.get("fail_reason", "")),
+        request_id=str(raw.get('request_id', '')),
     )
 
 

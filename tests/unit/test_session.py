@@ -820,3 +820,83 @@ def test_task_build_missing_oauth_prerequisite_is_unavailable(repo, monkeypatch)
     monkeypatch.setattr(session, 'ops_pipeline', lambda: None)
     with pytest.raises(domain_checks.BuildUnavailable, match='CLIENT_ID'):
         session._task_build('qmake')
+
+
+class RoutingClient(FakeClient):
+    def __init__(self, kind='develop', goal='update code', clarification='Какой результат нужен?'):
+        super().__init__()
+        self.kind, self.goal, self.clarification = kind, goal, clarification
+    def ask_with_usage_messages(self, messages, **kwargs):
+        import json
+        old = self.answer
+        if messages[0]['content'].startswith('Классифицируй'):
+            self.answer = json.dumps({'kind':self.kind, 'goal':self.goal if self.kind == 'develop' else '',
+                                     'clarification':self.clarification if self.kind == 'clarify' else ''})
+        result = super().ask_with_usage_messages(messages, **kwargs)
+        self.answer = old
+        return result
+
+
+def test_submit_development_replay_busy_restart_and_new_id(repo):
+    from dataclasses import replace
+    from core import task_state
+    client = RoutingClient()
+    session = _session(repo, client=client)
+    first = session.submit('update code', request_id='request-1')
+    assert first.kind == 'task' and first.task_run and first.task_number == 1
+    assert session.task_state.current.request_id == 'request-1'
+    replay = session.submit('update code', request_id='request-1')
+    assert replay.task_number == 1 and not replay.task_run
+    assert session.submit('another goal', request_id='request-2').kind == 'busy'
+    assert len(session.task_state.tasks) == 1
+    assert session.session_usage.requests == 1
+    session._pipeline._save(task_state._put_active(session.task_state, replace(session.task_state.current, stage=task_state.Stage.DONE, status=task_state.TASK_STATUS_DONE)))
+    restarted_client = RoutingClient()
+    restarted = _session(repo, client=restarted_client)
+    assert restarted.submit('update code', request_id='request-1').task_number == 1
+    assert restarted_client.calls == []
+    new = restarted.submit('update code', request_id='request-2')
+    assert new.task_number == 2 and new.task_run
+
+
+def test_submit_questions_and_explicit_no_write_remain_read_only(repo):
+    client = RoutingClient(kind='answer')
+    session = _session(repo, client=client)
+    result = session.submit('Как устроен проект?')
+    assert result.kind == 'answer' and result.answer.text == 'Это ответ.'
+    assert session.session_usage.requests == 2
+    client.kind = 'develop'
+    assert session.submit('Ничего не меняй, только предложи исправление').kind == 'answer'
+    assert not session.task_state.tasks and not session._changes.list()
+
+
+def test_submit_clarification_retains_original_request_and_does_not_approve_patch(repo):
+    import json
+    client = RoutingClient(kind='clarify')
+    session = _session(repo, client=client)
+    assert session.submit('Сделай лучше').kind == 'clarification'
+    client.kind, client.goal = 'develop', 'add file sorting'
+    result = session.submit('Добавь сортировку списка файлов')
+    assert result.kind == 'task'
+    context = json.loads(client.calls[-1]['messages'][-1]['content'])
+    assert any(m['content'] == 'Сделай лучше' for m in context['conversation'])
+    assert session._patch_confirmation is None and not session._changes.list()
+
+
+def test_replay_and_busy_return_while_task_lock_waits_for_confirmation(repo):
+    session = _session(repo, client=RoutingClient())
+    session.submit('update code', request_id='first')
+    locked, release = threading.Event(), threading.Event()
+    def hold():
+        with session._lock:
+            locked.set()
+            release.wait(5)
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert locked.wait(2)
+    try:
+        assert session.submit('update code', request_id='first').task_number == 1
+        assert session.submit('another goal', request_id='other').kind == 'busy'
+    finally:
+        release.set()
+        holder.join(2)

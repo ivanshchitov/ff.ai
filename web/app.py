@@ -631,6 +631,7 @@ class TaskRunner:
 
 class AskRequest(BaseModel):
     question: str = ""
+    request_id: Optional[str] = None
 
 
 class CommandRequest(BaseModel):
@@ -758,18 +759,25 @@ def create_app(
 
         unsubscribe = session.subscribe(collect)
         try:
-            answer = session.ask(question)
+            submission = session.submit(question, request_id=payload.request_id)
         except APIError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         finally:
             unsubscribe()
+        if submission.task_run:
+            runner.start()
+        answer = submission.answer
         return {
-            "question": answer.question,
-            "answer": answer.text,
-            "meta": to_jsonable(answer.meta),
+            "kind": submission.kind,
+            "task_number": submission.task_number,
+            "task_run": submission.task_run,
+            "message": submission.message,
+            "question": answer.question if answer else question,
+            "answer": answer.text if answer else submission.message,
+            "meta": to_jsonable(answer.meta) if answer else None,
             "journal": journal,
-            "sources": _sources_payload(session),
-            "citations": citations_payload(session.last_citations),
+            "sources": _sources_payload(session) if answer else [],
+            "citations": citations_payload(session.last_citations) if answer else None,
         }
 
     @app.post(f"{prefix}/api/command")

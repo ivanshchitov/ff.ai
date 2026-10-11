@@ -38,6 +38,7 @@ from . import (
     task_pipeline,
     task_state,
     task_context,
+    request_routing,
 )
 from .agent import CompressionReport, ContextReport, FactsReport, RepoAgent, RequestPhase
 from .answer_settings import AnswerSettings
@@ -118,6 +119,15 @@ class Answer:
 
 
 @dataclass(frozen=True)
+class SubmissionResult:
+    kind: str
+    answer: Optional[Answer] = None
+    task_number: Optional[int] = None
+    task_run: bool = False
+    message: str = ''
+
+
+@dataclass(frozen=True)
 class CommandResult:
     """Результат команды: строки для печати и признаки, важные интерфейсу."""
 
@@ -154,6 +164,9 @@ class AssistantSession:
     ) -> None:
         self.root = Path(root)
         self._lock = threading.RLock()
+        self._submission_lock = threading.Lock()
+        self._pending_request = ''
+        self._pending_clarification = ''
         self._listeners: List[Callable[[object], None]] = []
         self._exit_requested = False
         # Состояние проекта: история, память, задачи, расписание и отчёты живут в поддереве,
@@ -331,6 +344,55 @@ class AssistantSession:
 
     # --- операции -------------------------------------------------------------------------
 
+    def submit(self, text: str, request_id: Optional[str] = None) -> SubmissionResult:
+        """Route chat; replay and busy checks never wait on a patch confirmation lock."""
+        request_id = (request_id or '').strip()
+        text = text.strip()
+        with self._submission_lock:
+            if request_id:
+                existing = next((t for t in self._pipeline.state.tasks if t.request_id == request_id), None)
+                if existing:
+                    return SubmissionResult('task', task_number=existing.number,
+                                            message=f'Задача {existing.number}: {existing.goal} ({existing.status}).')
+            if not self._lock.acquire(blocking=False):
+                return SubmissionResult('busy', message='Сессия занята; дождитесь результата текущей операции.')
+            try:
+                if self._pipeline.unfinished():
+                    task = self._pipeline.state.current
+                    return SubmissionResult('busy', task_number=task.number if task else None,
+                                            message='Есть незавершённая задача; продолжите её или явно добавьте цель через /task add.')
+                if not text or len(request_id) > 128:
+                    return SubmissionResult('clarification', message='Нужен непустой запрос и request_id не длиннее 128 символов.')
+                conversation = []
+                for dialogue in self.history.dialogues[-4:]:
+                    conversation.extend(({'role':'user', 'content':str(dialogue.get('question',''))},
+                                         {'role':'assistant', 'content':str(dialogue.get('answer',''))}))
+                if self._pending_request:
+                    conversation.extend(({'role':'user', 'content':self._pending_request},
+                                         {'role':'assistant', 'content':self._pending_clarification}))
+                decision = request_routing.classify_request(
+                    text, conversation, self.domain,
+                    lambda messages: self._task_ask(messages, config.TASK_PLAN_MAX_WORDS, 'request_routing'))
+                if decision.kind == 'clarify':
+                    self._pending_request = self._pending_request or text
+                    self._pending_clarification = decision.clarification
+                    return SubmissionResult('clarification', message=decision.clarification)
+                forbidden = request_routing.write_forbidden(text + '\n' + self._pending_request)
+                self._pending_request = self._pending_clarification = ''
+                if decision.kind in ('answer', 'investigate') or forbidden:
+                    return SubmissionResult('answer', answer=self.ask(text))
+                state = self._pipeline.add(decision.goal, request_id=request_id)
+                if self._task_store.last_error:
+                    # A retry must never launch an unpersisted task twice.
+                    error = self._task_store.last_error
+                    self._pipeline.state = self._task_store.load()
+                    return SubmissionResult('clarification', message='Задача не сохранена: ' + error)
+                task = state.tasks[-1]
+                return SubmissionResult('task', task_number=task.number, task_run=True,
+                                        message=f'Задача {task.number}: {task.goal}. План будет показан перед выполнением.')
+            finally:
+                self._lock.release()
+
     def ask(self, question: str) -> Answer:
         """Задать вопрос. Операция блокирующая: следующий вызов ждёт завершения этого."""
         with self._lock:
@@ -374,6 +436,7 @@ class AssistantSession:
                 return CommandResult(command="/exit", lines=("Выход.",), exit_requested=True)
             if command == "/clear":
                 self._agent.reset()
+                self._pending_request = self._pending_clarification = ''
                 return CommandResult(command="/clear", lines=("Диалог очищен.",))
             if command == "/context":
                 return CommandResult(command="/context", lines=self.context_lines())

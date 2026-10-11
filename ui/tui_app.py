@@ -42,6 +42,7 @@ from . import branches_screen, commands_screen, keyboard, models_screen, setting
 
 INPUT_PROMPT = "Вы: "
 PHASE_LABELS = {
+    RequestPhase.REQUEST_ROUTING: "Разбор намерения…",
     RequestPhase.REQUEST: "Отправка вопроса...",
     RequestPhase.COMPRESSION: "Суммаризация контекста...",
     RequestPhase.FACTS_UPDATE: "Обновление фактов...",
@@ -169,10 +170,16 @@ class DevAssistantTUI:
         if not self._ensure_api_key():
             return
         try:
-            answer = self._ask_with_spinner(question)
+            submission = self._ask_with_spinner(question)
         except APIError as error:
             self.console.print(f"[bold red]Ошибка запроса: {escape(str(error))}[/bold red]")
             return
+        if submission.kind != 'answer':
+            self.console.print(escape(submission.message))
+            if submission.task_run:
+                self._run_task()
+            return
+        answer = submission.answer
         self._print_answer(answer.text)
         self._print_journal()
         self._print_sources()
@@ -198,7 +205,7 @@ class DevAssistantTUI:
 
             unsubscribe = self.session.subscribe(listener)
             try:
-                return self.session.ask(question)
+                return self.session.submit(question)
             finally:
                 unsubscribe()
 
