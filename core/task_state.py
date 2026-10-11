@@ -409,7 +409,7 @@ def next_item_index(task: TaskItem) -> Optional[int]:
     бесконечно. Неудачная попытка остаётся в снимке и попадает в замечания проверки.
     """
     for index, _ in enumerate(task.plan, start=1):
-        if task.patch_for(index) is None:
+        if task.patch_for(index) is None or task.patch_for(index).rolled_back:
             return index
     return None
 
@@ -433,6 +433,25 @@ def record_patch(state: TaskState, patch: TaskPatch) -> TaskState:
         return state
     kept = tuple(item for item in task.patches if item.index != patch.index)
     return _put_active(state, replace(task, patches=(kept + (patch,))))
+
+
+def rollback_change(state: TaskState, change_id: str) -> TaskState:
+    """Explicit undo reopens the affected task, records the transition and pauses it."""
+    tasks = list(state.tasks)
+    affected = None
+    for i, task in enumerate(tasks):
+        if not any(p.change_id == change_id and p.applied for p in task.patches):
+            continue
+        patches = tuple(replace(p, applied=False, rolled_back=True, reason='изменение отменено')
+                        if p.change_id == change_id else p for p in task.patches)
+        tasks[i] = replace(task, patches=patches, status=TASK_STATUS_RUNNING,
+                           stage=Stage.EXECUTION, awaiting_edits=False, result_path='',
+                           transitions=_log_transition(task, task.stage, Stage.EXECUTION,
+                                                       'пользователь отменил изменение ' + change_id, True))
+        affected = i
+    if affected is None:
+        return state
+    return replace(state, tasks=tuple(tasks), active=affected, paused=True)
 
 
 def fail_task(state: TaskState, reason: str) -> TaskState:

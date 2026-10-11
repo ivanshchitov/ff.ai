@@ -204,6 +204,8 @@ class TaskPipeline:
     def step(self) -> Optional[TaskStepReport]:
         """Выполняет ровно одну операцию текущего этапа; `None` — очередь пуста."""
         state = self.state
+        if state.paused:
+            return None
         if state.current is None or state.current.status != task_state.TASK_STATUS_RUNNING:
             state = self._save(task_state.begin_task(state))
         task = state.current

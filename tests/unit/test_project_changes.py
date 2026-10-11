@@ -153,3 +153,85 @@ def test_symlink_inserted_after_prepare_becomes_conflict(project, tmp_path):
     result = service.apply(record.id, lambda *_: True)
     assert not result.ok and result.record.status == 'conflict'
     assert external.read_text() == 'outside\n'
+
+
+def test_undo_exact_dirty_content_modes_and_existence_after_restart(project):
+    root, service = project
+    (root / 'notes.txt').write_text('staged\n')
+    git(root, 'add', 'notes.txt')
+    staged = git(root, 'diff', '--cached')
+    (root / 'notes.txt').write_text('manual\n')
+    (root / 'notes.txt').chmod(0o755)
+    (root / 'deleted.txt').write_text('keep me\n')
+    patch = edit(old='manual') + '--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+hello\n' + '--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-keep me\n'
+    record = service.prepare(patch, 3)
+    assert service.apply(record.id, lambda *_: True).ok
+    restarted = ProjectChanges(root, service.changes_dir)
+    seen = []
+    result = restarted.undo(record.id, lambda summary, diff: seen.append(diff) or True)
+    assert result.ok and result.record.status == 'undone'
+    assert '-agent' in seen[0] and '+manual' in seen[0]
+    assert (root / 'notes.txt').read_text() == 'manual\n'
+    assert (root / 'notes.txt').stat().st_mode & 0o777 == 0o755
+    assert (root / 'deleted.txt').read_text() == 'keep me\n'
+    assert not (root / 'docs').exists()
+    assert git(root, 'diff', '--cached') == staged
+    assert not restarted.undo(record.id, lambda *_: pytest.fail('repeat confirmation')).ok
+
+
+def test_undo_manual_conflict_preserves_entire_package(project):
+    root, service = project
+    (root / 'second.txt').write_text('base\n')
+    record = service.prepare(edit() + edit('second.txt'))
+    assert service.apply(record.id, lambda *_: True).ok
+    (root / 'second.txt').write_text('user\n')
+    assert not service.undo(record.id, lambda *_: True).ok
+    assert (root / 'notes.txt').read_text() == 'agent\n'
+    assert (root / 'second.txt').read_text() == 'user\n'
+
+
+def test_undo_approval_race_and_no_confirmation(project):
+    root, service = project
+    record = service.prepare(edit())
+    assert service.apply(record.id, lambda *_: True).ok
+    assert not service.undo(record.id, None).ok
+    def confirm(*_):
+        (root / 'notes.txt').write_text('user\n')
+        return True
+    assert not service.undo(record.id, confirm).ok
+    assert (root / 'notes.txt').read_text() == 'user\n'
+
+
+def test_undo_dependencies_require_reverse_order(project):
+    root, service = project
+    first = service.prepare(edit())
+    service.apply(first.id, lambda *_: True)
+    second = service.prepare(edit(old='agent', new='base'))
+    service.apply(second.id, lambda *_: True)
+    # Even if later content accidentally matches the first postimage, dependency is explicit.
+    third = service.prepare(edit())
+    service.apply(third.id, lambda *_: True)
+    assert not service.undo(first.id, lambda *_: True).ok
+    assert service.undo(third.id, lambda *_: True).ok
+    assert service.undo(second.id, lambda *_: True).ok
+    assert service.undo(first.id, lambda *_: True).ok
+
+
+@pytest.mark.parametrize('state', ['before', 'after', 'mixed', 'unknown'])
+def test_recover_interrupted_undo(project, state):
+    root, service = project
+    (root / 'second.txt').write_text('base\n')
+    record = service.prepare(edit() + edit('second.txt'))
+    service.apply(record.id, lambda *_: True)
+    record.status = 'undoing'
+    service._save(record)
+    if state in ('before', 'mixed', 'unknown'):
+        (root / 'notes.txt').write_text('base\n')
+    if state == 'before':
+        (root / 'second.txt').write_text('base\n')
+    if state == 'unknown':
+        (root / 'second.txt').write_text('manual\n')
+    recovered = ProjectChanges(root, service.changes_dir).recover()[0]
+    assert recovered.status == {'before':'undone', 'after':'applied', 'mixed':'undone', 'unknown':'conflict'}[state]
+    if state == 'unknown':
+        assert (root / 'second.txt').read_text() == 'manual\n'

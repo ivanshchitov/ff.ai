@@ -217,6 +217,9 @@ class AssistantSession:
             tasks_dir=self._project_paths["tasks_dir"],
             changes=self._changes,
         )
+        for record in self._changes.list() if not self._change_recovery_error else ():
+            if record.status == 'undone':
+                self._pipeline._save(task_state.rollback_change(self._pipeline.state, record.id))
         # Каталог выгрузок читает серверный процесс: он получает его из окружения приложения.
         os.environ.setdefault("FFAI_EXPORTS_DIR", str(self._project_paths["exports_dir"]))
         # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
@@ -378,6 +381,8 @@ class AssistantSession:
                 return self._tool_command(argument)
             if command == "/task":
                 return self._task_command(argument)
+            if command == "/changes":
+                return self._changes_command(argument)
             if command == "/ops":
                 return self._ops_command(argument)
             if command == "/memory":
@@ -1001,6 +1006,29 @@ class AssistantSession:
         except (project_changes.ChangeError, patches.PatchError, OSError) as error:
             return task_state.TaskPatch(index, patch_text, "", False, str(error))
 
+    def _changes_command(self, argument: str) -> CommandResult:
+        tokens = argument.split()
+        try:
+            if not tokens:
+                lines = tuple(f'{r.id} — {r.status}; задача {r.task_number or "—"}; ' + ', '.join(r.paths)
+                              + (': ' + r.reason if r.reason else '') for r in self._changes.list())
+                if self._change_recovery_error:
+                    lines += ('Recovery: ' + self._change_recovery_error,)
+                return CommandResult('/changes', lines or ('Изменений агента нет.',))
+            if len(tokens) == 2 and tokens[0] == 'show':
+                record = self._changes.get(tokens[1])
+                return CommandResult('/changes', (f'{record.id} — {record.status}', record.reason,
+                                                    *record.validation, record.patch))
+            if len(tokens) == 2 and tokens[0] == 'undo':
+                result = self._changes.undo(tokens[1], self._patch_confirmation)
+                if result.ok:
+                    self._pipeline._save(task_state.rollback_change(self._pipeline.state, result.record.id))
+                return CommandResult('/changes', (f'{result.record.id} — {result.record.status}',
+                                                    result.reason or 'Изменение отменено; задача на паузе.'))
+        except (project_changes.ChangeError, OSError) as error:
+            return CommandResult('/changes', (str(error),))
+        return CommandResult('/changes', ('Форма: /changes, /changes show <id>, /changes undo <id>',))
+
     def _task_command(self, argument: str) -> CommandResult:
         """`/task` — отчёт, `/task add <цель>`, `/task run`, `/task stage <этап>`, `/task stop`."""
         tokens = argument.split(maxsplit=1)
@@ -1083,6 +1111,8 @@ class AssistantSession:
                 note = ""
                 if patch is not None and not patch.applied:
                     note = f" — {patch.reason or 'не применён'}"
+                if patch is not None and patch.change_id:
+                    note += f" (изменение {patch.change_id})"
                 lines.append(f"    [{mark}] {index}. {item}{note}")
             if task.issues:
                 lines.append("Замечания:")

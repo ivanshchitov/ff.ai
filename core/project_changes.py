@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import hashlib
 import json
 import os
@@ -268,3 +269,44 @@ class ProjectChanges:
                 self._result(record, False, 'conflict', str(error))
             recovered.append(record)
         return tuple(recovered)
+
+    def reverse_diff(self, record: ChangeRecord) -> str:
+        lines = []
+        for name in record.paths:
+            before, after = record.before[name], record.after[name]
+            lines.append(f'diff --git a/{name} b/{name}\n')
+            if before.exists and after.exists and before.mode != after.mode:
+                lines.extend((f'old mode {after.mode | 0o100000:o}\n', f'new mode {before.mode | 0o100000:o}\n'))
+            diff = difflib.unified_diff(after.bytes.decode('utf-8').splitlines(keepends=True),
+                                        before.bytes.decode('utf-8').splitlines(keepends=True),
+                                        fromfile='a/' + name if after.exists else '/dev/null',
+                                        tofile='b/' + name if before.exists else '/dev/null')
+            for line in diff:
+                lines.append(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n')
+        return ''.join(lines)
+
+    def undo(self, change_id: str, confirm=None) -> ChangeResult:
+        record = self.get(change_id)
+        if record.status != 'applied':
+            return ChangeResult(False, record, 'откат недоступен: ' + record.status)
+        records = self.list()
+        position = next(i for i, item in enumerate(records) if item.id == change_id)
+        if any(item.status == 'applied' and set(item.paths).intersection(record.paths)
+               for item in records[position + 1:]):
+            return ChangeResult(False, record, 'сначала отмените более поздние зависимые изменения')
+        try:
+            if self._states(record.paths) != record.after:
+                return self._result(record, False, 'conflict', 'файлы изменились после применения')
+            if confirm is None or not confirm('Откат ' + record.id + ': ' + ', '.join(record.paths),
+                                              self.reverse_diff(record)):
+                return ChangeResult(False, record, 'откат не подтвержден')
+            if self._states(record.paths) != record.after:
+                return self._result(record, False, 'conflict', 'файлы изменились во время подтверждения')
+            record.status = 'undoing'
+            self._save(record)
+            self._restore_known(record, record.before)
+            return self._result(record, True, 'undone')
+        except ChangeError as error:
+            return self._result(record, False, 'conflict', str(error))
+        except OSError as error:
+            return ChangeResult(False, record, 'откат прерван; требуется recovery: ' + str(error))

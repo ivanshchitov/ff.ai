@@ -391,3 +391,14 @@ def test_change_metadata_roundtrip_and_legacy_defaults(tmp_path):
     store.path.write_text(__import__('json').dumps(raw))
     restored = store.load().current.patch_for(1)
     assert restored.change_id == '' and not restored.rolled_back
+
+
+def test_undo_reopens_completed_task_without_automatic_execution():
+    state = _planned()
+    state = task_state.record_patch(state, TaskPatch(1, 'diff', 'docs', True, change_id='c' * 16))
+    state = task_state._put_active(state, _task_with_stage(state.current, stage=Stage.DONE, status=task_state.TASK_STATUS_DONE))
+    undone = task_state.rollback_change(state, 'c' * 16)
+    assert undone.paused and undone.current.stage is Stage.EXECUTION
+    assert undone.current.patch_for(1).rolled_back
+    assert task_state.next_item_index(undone.current) == 1
+    assert task_state.rollback_change(undone, 'c' * 16) == undone

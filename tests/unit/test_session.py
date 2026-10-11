@@ -741,3 +741,27 @@ def test_schedule_startup_line(repo: Path):
 def test_schedule_announcement_is_empty_without_runs(repo: Path):
     session = _session(repo)
     assert session.schedule_announcement() == ()
+
+
+def test_changes_commands_confirm_undo_and_pause_task(repo):
+    import subprocess
+    from core import task_state
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / 'notes.txt').write_text('before\n')
+    session = _session(repo)
+    session.run_command('/task add update docs')
+    session.set_patch_confirmation(lambda *_: True)
+    patch = session._task_prepare(1, '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-before\n+after\n')
+    assert patch.applied and patch.change_id
+    session._pipeline._save(task_state.record_patch(session.task_state, patch))
+    assert patch.change_id in '\n'.join(session.run_command('/changes').lines)
+    assert '+after' in '\n'.join(session.run_command('/changes show ' + patch.change_id).lines)
+    result = session.run_command('/changes undo ' + patch.change_id)
+    assert 'undone' in '\n'.join(result.lines)
+    assert (repo / 'notes.txt').read_text() == 'before\n'
+    assert session.task_paused
+    assert session.task_state.current.patch_for(1).rolled_back
+    assert not session.task_state.current.patch_for(1).applied
+    assert session.task_step() is None
+    unknown = session.run_command('/changes undo unknown')
+    assert 'id' in '\n'.join(unknown.lines)
