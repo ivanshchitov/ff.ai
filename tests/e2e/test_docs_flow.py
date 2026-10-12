@@ -83,7 +83,7 @@ def test_cited_answer_is_accepted_with_sources_line(stub, tmp_path: Path):
     session = _launch(tmp_path, stub)
     try:
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 2, "оценка кандидатов и ответ"
+        assert stub.call_count == 3, "классификация, оценка кандидатов и ответ"
         assert client_answer_calls(stub) == 1, "подтверждённый ответ не требует повтора"
         screen = session.screen_text()
         assert "📚 Источники (документация 5.2.1)" in screen
@@ -125,7 +125,7 @@ def test_disabled_mode_removes_search_and_check(stub, tmp_path: Path):
         session.send_line("/rag-docs mode off")
         session.wait_for("Поиск по документации выключен")
         session.ask(QUESTION, timeout=DOCS_TIMEOUT)
-        assert stub.call_count == 1, "без корпуса нет ни оценки, ни повтора"
+        assert stub.call_count == 2, "классификация и ответ; без корпуса нет оценки и повтора"
         assert UNCITED[:40] in session.screen_text()
         payload = json.dumps(stub.last_payload(), ensure_ascii=False)
         assert "Ниже — фрагменты" not in payload
@@ -178,6 +178,7 @@ def client_answer_calls(stub: StubAPI) -> int:
         1
         for request in stub.requests
         if "оцениваешь" not in request["payload"]["messages"][0]["content"]
+        and not request["payload"]["messages"][0]["content"].startswith("Классифицируй")
     )
 
 

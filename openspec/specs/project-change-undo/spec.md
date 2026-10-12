@@ -1,7 +1,7 @@
 # project-change-undo Specification
 
 ## Purpose
-TBD - created by archiving change add-project-change-undo. Update Purpose after archive.
+Undo agent operations while preserving user edits and the Git index.
 
 ## Requirements
 

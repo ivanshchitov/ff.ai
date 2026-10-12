@@ -1,7 +1,7 @@
 # chat-development-routing Specification
 
 ## Purpose
-TBD - created by archiving change route-chat-development-requests. Update Purpose after archive.
+Route natural chat requests to read-only answers, clarification or the existing confirmed development pipeline.
 
 ## Requirements
 

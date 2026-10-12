@@ -1,7 +1,7 @@
 # development-task-context Specification
 
 ## Purpose
-TBD - created by archiving change add-development-task-context. Update Purpose after archive.
+Supply current project files and bounded read-only evidence to development stages and validation.
 
 ## Requirements
 

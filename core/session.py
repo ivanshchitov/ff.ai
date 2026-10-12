@@ -165,6 +165,7 @@ class AssistantSession:
         self.root = Path(root)
         self._lock = threading.RLock()
         self._submission_lock = threading.Lock()
+        self._listeners_lock = threading.Lock()
         self._pending_request = ''
         self._pending_clarification = ''
         self._listeners: List[Callable[[object], None]] = []
@@ -238,9 +239,10 @@ class AssistantSession:
             changes=self._changes,
             context=self._task_context,
         )
-        for record in self._changes.list() if not self._change_recovery_error else ():
-            if record.status == 'undone':
-                self._pipeline._save(task_state.rollback_change(self._pipeline.state, record.id))
+        records = self._changes.list() if not self._change_recovery_error else ()
+        reconciled = task_state.reconcile_changes(self._pipeline.state, records)
+        if reconciled != self._pipeline.state:
+            self._pipeline._save(reconciled)
         # Каталог выгрузок читает серверный процесс: он получает его из окружения приложения.
         os.environ.setdefault("FFAI_EXPORTS_DIR", str(self._project_paths["exports_dir"]))
         # Подтверждение записи в репозиторий даёт интерфейс; без него патчи не применяются.
@@ -324,18 +326,20 @@ class AssistantSession:
 
     def subscribe(self, listener: Callable[[object], None]) -> Callable[[], None]:
         """Подписка на события; возвращает функцию отписки."""
-        with self._lock:
+        with self._listeners_lock:
             self._listeners.append(listener)
 
         def unsubscribe() -> None:
-            with self._lock:
+            with self._listeners_lock:
                 if listener in self._listeners:
                     self._listeners.remove(listener)
 
         return unsubscribe
 
     def _emit(self, event: object) -> None:
-        for listener in tuple(self._listeners):
+        with self._listeners_lock:
+            listeners = tuple(self._listeners)
+        for listener in listeners:
             try:
                 listener(event)
             except Exception:
@@ -354,6 +358,10 @@ class AssistantSession:
                 if existing:
                     return SubmissionResult('task', task_number=existing.number,
                                             message=f'Задача {existing.number}: {existing.goal} ({existing.status}).')
+                previous = dict(self._pipeline.state.request_ids).get(request_id)
+                if previous is not None:
+                    return SubmissionResult('task', task_number=previous,
+                                            message=f'Задача {previous} остановлена; повторный запрос не запускается.')
             if not self._lock.acquire(blocking=False):
                 return SubmissionResult('busy', message='Сессия занята; дождитесь результата текущей операции.')
             try:
@@ -1036,6 +1044,8 @@ class AssistantSession:
 
     def _read_task_flow(self, question):
         self._require_client()
+        if self._agent.config.auto_tools and not self._mcp_connections:
+            self.connect_mcp_servers()
         return self._agent._run_tool_flow(question, None)
 
     def _invalidate_code(self):
@@ -1105,7 +1115,7 @@ class AssistantSession:
         """All task writes pass through the durable, confirmed project change gate."""
         try:
             task = self._pipeline.state.current
-            record = self._changes.prepare(patch_text, task.number if task else None)
+            record = self._changes.prepare(patch_text, task.number if task else None, step_index=index)
             result = self._changes.apply(record.id, self._patch_confirmation)
             if result.ok:
                 self._invalidate_code()
@@ -1113,6 +1123,29 @@ class AssistantSession:
                                         result.ok, result.reason, record.id)
         except (project_changes.ChangeError, patches.PatchError, OSError) as error:
             return task_state.TaskPatch(index, patch_text, "", False, str(error))
+
+    def project_changes_report(self):
+        """Read atomic journal snapshots without waiting on a task's confirmation mutex."""
+        try:
+            return tuple({'id': r.id, 'task_number': r.task_number, 'step_index': r.step_index,
+                          'status': r.status, 'reason': r.reason, 'paths': list(r.paths),
+                          'validation': list(r.validation)} for r in self._changes.list())
+        except (project_changes.ChangeError, OSError) as error:
+            return ({'status': 'error', 'reason': str(error)},)
+
+    @property
+    def code_index_stale(self):
+        return bool(getattr(self._code_retriever, 'stale_reason', ''))
+
+    def patch_confirmation_context(self, summary):
+        match = re.search(r'\b[0-9a-f]{16}\b', summary)
+        if match:
+            try:
+                record = self._changes.get(match[0])
+                return {'task_number': record.task_number, 'change_id': record.id}
+            except project_changes.ChangeError:
+                pass
+        return {}
 
     def _changes_command(self, argument: str) -> CommandResult:
         tokens = argument.split()

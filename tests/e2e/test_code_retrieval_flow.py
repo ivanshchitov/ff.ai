@@ -209,7 +209,7 @@ def test_baseline_mode_skips_auxiliary_requests(stub, tmp_path: Path):
         app.wait_for("Режим отбора: baseline", timeout=LIVE)
         app.ask(QUESTION, timeout=LIVE)
 
-        assert len(stub.requests) == 1, "в baseline только запрос ответа"
+        assert len(stub.requests) == 2, "классификация и ответ в baseline"
         assert "Code" not in app.screen_text() or True
     finally:
         app.close()

@@ -35,11 +35,11 @@ def _launch(stub: StubAPI, tmp_path: Path, repo: Path = None, **kwargs) -> AppSe
 def test_request_carries_the_domain_role_and_the_configured_limits(app, stub):
     stub.always(answer(REPLY))
     app.ask(QUESTION)
-    system = stub.system_messages()[0]
+    system = stub.system_messages()[1]
     assert "ОС Аврора" in system
     assert "Qt 5.6" in system
     assert "вне области" in system  # правила отказа из пакета домена
-    user = stub.user_messages()[0]
+    user = stub.user_messages()[1]
     # Объём по умолчанию — максимум диапазона, поэтому проверяется он, а не прежние 200.
     assert f"не более {config.DEFAULT_MAX_WORDS} слов" in user
     assert "не более 3 вариантов" in user
@@ -90,7 +90,7 @@ def test_second_question_carries_the_previous_exchange(app, stub):
     app.ask("а где он используется?")
     roles = [message["role"] for message in stub.last_payload()["messages"]]
     assert roles.count("assistant") == 1
-    assert stub.call_count == 2
+    assert stub.call_count == 4
 
 
 def test_history_is_restored_on_restart(stub, tmp_path: Path):
@@ -106,7 +106,7 @@ def test_history_is_restored_on_restart(stub, tmp_path: Path):
         screen = second.wait_for("Восстановлено из истории")
         assert "1 обменов" in screen
         assert second.ask("продолжаем?")
-        assert stub.call_count == 2
+        assert stub.call_count == 4
     finally:
         second.close()
 

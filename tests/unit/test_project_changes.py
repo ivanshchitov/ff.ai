@@ -235,3 +235,43 @@ def test_recover_interrupted_undo(project, state):
     assert recovered.status == {'before':'undone', 'after':'applied', 'mixed':'undone', 'unknown':'conflict'}[state]
     if state == 'unknown':
         assert (root / 'second.txt').read_text() == 'manual\n'
+
+
+def test_git_path_whitespace_never_creates_an_unjournaled_file(project):
+    root, service = project
+    patch = '--- /dev/null\n+++ b/new.txt \n@@ -0,0 +1 @@\n+hello\n'
+    with pytest.raises(ChangeError):
+        service.prepare(patch)
+    assert not (root / 'new.txt ').exists()
+    assert not service.list()
+
+
+@pytest.mark.parametrize('mode', ['0120000', '00120000', '0160000'])
+def test_numeric_nonregular_modes_are_rejected_before_target_write(project, mode):
+    root, service = project
+    patch = f'diff --git a/link b/link\nnew file mode {mode}\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+/tmp/secret-outside\n'
+    with pytest.raises(ChangeError):
+        service.prepare(patch)
+    assert not (root / 'link').is_symlink()
+    assert not service.list()
+
+
+def test_sandbox_file_reader_never_follows_links(tmp_path):
+    target = tmp_path / 'external'
+    target.write_text('external data')
+    link = tmp_path / 'link'
+    link.symlink_to(target)
+    with pytest.raises(ChangeError):
+        ProjectChanges._read(link)
+
+
+def test_hunk_text_that_looks_like_a_header_remains_content(project):
+    root, service = project
+    (root / 'notes.txt').write_text('-- old\n')
+    patch = '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n--- old\n+++ new\n'
+    record = service.prepare(patch)
+    assert record.paths == ('notes.txt',)
+    assert patches.parse(patch).added_lines() == ('++ new',)
+    assert service.apply(record.id, lambda *_: True).ok
+    assert (root / 'notes.txt').read_text() == '++ new\n'
+    assert service.undo(record.id, lambda *_: True).ok

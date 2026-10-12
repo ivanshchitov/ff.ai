@@ -110,6 +110,7 @@ def task_snapshot(session: AssistantSession) -> Dict[str, Any]:
     внутренности конвейера, он печатает то, что положил в состояние сам конвейер.
     """
     state = session.task_state
+    changes = getattr(session, 'project_changes_report', lambda: ())()
     tasks: List[Dict[str, Any]] = []
     for task in state.tasks:
         plan: List[Dict[str, Any]] = []
@@ -123,6 +124,8 @@ def task_snapshot(session: AssistantSession) -> Dict[str, Any]:
                     "reason": patch.reason if patch is not None else "",
                     "summary": patch.summary if patch is not None else "",
                     "patch": patch.text if patch is not None else "",
+                    "change_id": patch.change_id if patch is not None else "",
+                    "rolled_back": bool(patch is not None and patch.rolled_back),
                 }
             )
         tasks.append(
@@ -140,6 +143,9 @@ def task_snapshot(session: AssistantSession) -> Dict[str, Any]:
                 "transitions": [entry.line() for entry in task.transitions],
                 "result_path": task.result_path,
                 "fail_reason": task.fail_reason,
+                "request_id": task.request_id,
+                "changes": [record for record in changes if record.get('task_number') == task.number],
+                "index_stale": bool(getattr(session, 'code_index_stale', False)),
             }
         )
     current = state.current
@@ -404,13 +410,14 @@ def sse_stream(
 class _Pending:
     """Ожидаемый ответ браузера: идентификатор, суть запроса и событие его решения."""
 
-    def __init__(self, request_id: str, kind: str, summary: str, detail: str) -> None:
+    def __init__(self, request_id: str, kind: str, summary: str, detail: str, metadata=None) -> None:
         self.id = request_id
         self.kind = kind
         self.summary = summary
         self.detail = detail
         self.answered = threading.Event()
         self.approved = False
+        self.metadata = metadata or {}
 
     def payload(self) -> Dict[str, Any]:
         return {
@@ -418,6 +425,7 @@ class _Pending:
             "kind": self.kind,
             "summary": self.summary,
             "detail": self.detail,
+            **self.metadata,
         }
 
 
@@ -429,18 +437,19 @@ class ConfirmationBroker:
     считаем отказом: необратимый шаг без ответа человека не выполняется.
     """
 
-    def __init__(self, bus: EventBus, timeout: float) -> None:
+    def __init__(self, bus: EventBus, timeout: float, patch_context=None) -> None:
         self._bus = bus
         self._timeout = timeout
         self._lock = threading.Lock()
         self._pending: Dict[str, _Pending] = {}
+        self._patch_context = patch_context or (lambda _: {})
 
     @property
     def timeout(self) -> float:
         return self._timeout
 
-    def request(self, kind: str, summary: str, detail: str) -> bool:
-        pending = _Pending(uuid.uuid4().hex, kind, summary, detail)
+    def request(self, kind: str, summary: str, detail: str, metadata=None) -> bool:
+        pending = _Pending(uuid.uuid4().hex, kind, summary, detail, metadata)
         with self._lock:
             self._pending[pending.id] = pending
         self._bus.publish({"type": "confirmation_request", **pending.payload()})
@@ -474,7 +483,7 @@ class ConfirmationBroker:
 
     # Обработчики, которые регистрирует фасад: подписи — его контракт.
     def patch_confirmation(self, summary: str, patch_text: str) -> bool:
-        return self.request("patch", summary, patch_text)
+        return self.request("patch", summary, patch_text, self._patch_context(summary))
 
     def ops_confirmation(self, step: str, description: str) -> bool:
         return self.request("ops", step, description)
@@ -590,7 +599,9 @@ class TaskRunner:
                 if report is None:
                     break
                 for note in report.notes:
-                    self._bus.publish({"type": "journal", "text": note})
+                    current = self._session.task_state.current
+                    self._bus.publish({"type": "journal", "text": note,
+                                       "task_number": current.number if current else None})
                 self._publish_state(running=True)
                 if report.awaiting_edits:
                     self._bus.publish(
@@ -623,6 +634,8 @@ class TaskRunner:
                 self._edits_text = ""
                 return text
             if self._paused.is_set() or self._stopped.is_set():
+                return None
+            if self._session.task_paused:
                 return None
 
 
@@ -699,7 +712,7 @@ def create_app(
         if confirmation_timeout is not None
         else float(os.getenv(CONFIRM_TIMEOUT_ENV, str(DEFAULT_CONFIRM_TIMEOUT)))
     )
-    confirmations = ConfirmationBroker(bus, timeout)
+    confirmations = ConfirmationBroker(bus, timeout, getattr(session, 'patch_confirmation_context', None))
     runner = TaskRunner(session, bus)
 
     app = FastAPI(title="ff.ai web", version="0.1", lifespan=_lifespan(bus, runner))
@@ -801,6 +814,8 @@ def create_app(
         # `/task run` в TUI ведёт интерфейс; здесь прогон ведёт фоновый исполнитель.
         body["task_run_started"] = runner.start() if result.task_run else False
         bus.publish({"type": "command", "data": body})
+        if result.command in ('/changes', '/task'):
+            bus.publish({"type": "task", "running": runner.running, "data": task_snapshot(session)})
         return body
 
     @app.post(f"{prefix}/api/settings")

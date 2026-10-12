@@ -189,7 +189,7 @@ def test_auto_off_removes_the_choice_request(stub, tmp_path: Path):
         app.ask("обычный вопрос", timeout=LIVE)
 
         assert _choice_requests(stub) == [], "выключенный автовызов не выбирает инструменты"
-        assert len(stub.requests) == 1, "только запрос ответа"
+        assert len(stub.requests) == 2, "классификация и ответ"
         app.send_line("/tool flow")
         assert "Автовызов инструментов: выключен" in app.wait_for(
             "Автовызов инструментов: выключен", timeout=LIVE

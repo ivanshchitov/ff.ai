@@ -193,6 +193,7 @@ class TaskState:
     active: int = 0
     paused: bool = False
     next_number: int = 1
+    request_ids: Tuple[Tuple[str, int], ...] = ()
 
     @property
     def current(self) -> Optional[TaskItem]:
@@ -332,12 +333,15 @@ def add_task(state: TaskState, goal: str, request_id: str = '') -> TaskState:
     if not text:
         return state
     task = TaskItem(number=state.next_number, goal=text, request_id=request_id)
-    return replace(state, tasks=state.tasks + (task,), next_number=state.next_number + 1)
+    ids = state.request_ids + ((request_id, task.number),) if request_id else state.request_ids
+    return replace(state, tasks=state.tasks + (task,), next_number=state.next_number + 1, request_ids=ids)
 
 
 def drop_all(state: TaskState) -> TaskState:
     """Останавливает прогон: очередь опустошается, активная задача сбрасывается."""
-    return replace(state, tasks=(), active=0, paused=False)
+    ids = dict(state.request_ids)
+    ids.update((task.request_id, task.number) for task in state.tasks if task.request_id)
+    return replace(state, tasks=(), active=0, paused=False, request_ids=tuple(ids.items()))
 
 
 def set_paused(state: TaskState, paused: bool) -> TaskState:
@@ -455,6 +459,28 @@ def rollback_change(state: TaskState, change_id: str) -> TaskState:
     if affected is None:
         return state
     return replace(state, tasks=tuple(tasks), active=affected, paused=True)
+
+
+def reconcile_changes(state: TaskState, records) -> TaskState:
+    """Recover the task write that may have been interrupted after durable apply."""
+    for record in records:
+        index = record.step_index
+        if record.status not in ('applied', 'undone') or not index:
+            if record.status == 'undone':
+                state = rollback_change(state, record.id)
+            continue
+        tasks = list(state.tasks)
+        for position, task in enumerate(tasks):
+            if task.number != record.task_number or not 1 <= index <= len(task.plan):
+                continue
+            existing = task.patch_for(index)
+            if existing is None or existing.change_id != record.id and not existing.applied:
+                patch = TaskPatch(index, record.patch, ', '.join(record.paths), True, change_id=record.id)
+                tasks[position] = replace(task, patches=tuple(p for p in task.patches if p.index != index) + (patch,))
+                state = replace(state, tasks=tuple(tasks))
+            if record.status == 'undone':
+                state = rollback_change(state, record.id)
+    return state
 
 
 def fail_task(state: TaskState, reason: str) -> TaskState:
@@ -687,6 +713,7 @@ def _state_to_dict(state: TaskState) -> Dict[str, object]:
         "active": state.active,
         "paused": state.paused,
         "next_number": state.next_number,
+        "request_ids": dict(state.request_ids),
         "tasks": [_task_to_dict(task) for task in state.tasks],
     }
 
@@ -745,6 +772,8 @@ def _state_from_dict(raw: Dict[str, object]) -> TaskState:
         active=_as_int(raw.get("active")),
         paused=bool(raw.get("paused", False)),
         next_number=max(_as_int(raw.get("next_number"), 1), len(items) + 1),
+        request_ids=tuple((str(key), _as_int(number)) for key, number in raw.get('request_ids', {}).items())
+        if isinstance(raw.get('request_ids', {}), dict) else (),
     )
 
 

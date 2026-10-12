@@ -584,11 +584,9 @@ class DevAssistantTUI:
     def _confirm_patch(self, summary: str, patch_text: str) -> bool:
         """Подтверждение записи в репозиторий: показывает патч и читает один ответ."""
         self.console.print(f"[bold]Патч к применению: {escape(summary)}[/bold]")
-        preview = patch_text.strip().splitlines()[:20]
+        preview = patch_text.strip().splitlines()
         for line in preview:
             self.console.print(f"[dim]{escape(line)}[/dim]")
-        if len(patch_text.strip().splitlines()) > len(preview):
-            self.console.print("[dim]… патч показан не целиком[/dim]")
         self.console.print("Применить патч? y — да, n — нет")
         try:
             key = keyboard.read_char().strip().casefold()

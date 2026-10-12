@@ -48,6 +48,7 @@ class ChangeRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     changed_at: float = 0.0
+    step_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,8 @@ class ProjectChanges:
 
     @staticmethod
     def _read(path: Path) -> FileState:
+        if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
+            raise ChangeError('нужен обычный файл без символьной ссылки')
         if not path.exists():
             return FileState(False)
         content = path.read_bytes()
@@ -96,7 +99,7 @@ class ProjectChanges:
             raise ChangeError(reason)
         return parsed
 
-    def prepare(self, patch_text: str, task_number=None) -> ChangeRecord:
+    def prepare(self, patch_text: str, task_number=None, step_index=0) -> ChangeRecord:
         parsed = self._check(patch_text)
         names = tuple(dict.fromkeys(parsed.paths))
         before = self._states(names)
@@ -118,10 +121,16 @@ class ProjectChanges:
             reason = patches.apply(sandbox, patch_text)
             if reason:
                 raise ChangeError(reason)
-            after = {name: self._read(sandbox / name) for name in names}
+            for path in sandbox.rglob('*'):
+                if path.is_symlink() or (not path.is_dir() and not stat.S_ISREG(path.lstat().st_mode)):
+                    raise ChangeError('патч создаёт неподдерживаемый тип файла')
+                if path.is_file() and path.relative_to(sandbox).as_posix() not in names:
+                    raise ChangeError('пути результата не совпадают с журналом')
+            after = {name: self._read(patches.safe_path(sandbox, name)) for name in names}
         record = ChangeRecord(uuid.uuid4().hex[:16], task_number, self.root_identity,
                               patch_text, names, before, after,
                               tuple(sorted(created_dirs, key=lambda p: (-len(Path(p).parts), p))))
+        record.step_index = step_index
         self._save(record)
         return record
 
@@ -198,7 +207,7 @@ class ProjectChanges:
             return ChangeResult(False, record, 'изменение уже обработано: ' + record.status)
         if confirm is None:
             return ChangeResult(False, record, 'применение не подтверждено')
-        if not confirm(patches.parse(record.patch).summary(), record.patch):
+        if not confirm('Изменение ' + record.id + ': ' + patches.parse(record.patch).summary(), record.patch):
             return ChangeResult(False, record, 'пользователь отказался применять патч')
         try:
             if self._states(record.paths) != record.before:

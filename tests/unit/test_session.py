@@ -900,3 +900,50 @@ def test_replay_and_busy_return_while_task_lock_waits_for_confirmation(repo):
     finally:
         release.set()
         holder.join(2)
+
+
+def test_restart_recovers_applied_patch_before_task_save(repo):
+    from core import task_state, patches
+    session = _session(repo)
+    (repo / 'source.cpp').write_text('old\n')
+    state = task_state.add_task(task_state.TaskState(), 'update source')
+    state = task_state.edits_response(task_state.plan_built(task_state.begin_task(state), ('update source',)), '')
+    session._pipeline._save(state)
+    session.set_patch_confirmation(lambda *_: True)
+    patch = '--- a/source.cpp\n+++ b/source.cpp\n@@ -1 +1 @@\n-old\n+new\n'
+    prepared = session._task_prepare(1, patch)  # Simulate termination before record_patch/_save.
+    assert prepared.applied
+    restarted = _session(repo)
+    recovered = restarted.task_state.current.patch_for(1)
+    assert recovered is not None and recovered.applied and recovered.change_id == prepared.change_id
+    assert task_state.next_item_index(restarted.task_state.current) is None
+    restarted.set_patch_confirmation(lambda *_: True)
+    restarted.run_command('/changes undo ' + prepared.change_id)
+    assert restarted.task_paused
+    assert (repo / 'source.cpp').read_text() == 'old\n'
+
+
+def test_stopped_request_id_replays_without_new_task_after_restart(repo):
+    client = FakeClient(answer='{"kind":"develop","goal":"update docs","clarification":""}')
+    session = _session(repo, client=client)
+    first = session.submit('update docs', 'stopped-request')
+    assert first.task_run
+    session.run_command('/task stop')
+    restarted = _session(repo, client=client)
+    before = len(client.calls)
+    replay = restarted.submit('update docs', 'stopped-request')
+    assert replay.task_number == first.task_number and not replay.task_run
+    assert not restarted.task_state.unfinished()
+    assert len(client.calls) == before
+
+
+def test_development_lazy_discovery_includes_declared_http_read_servers(repo, monkeypatch):
+    from core.mcp_registry import MCPServerSpec
+    from tests.conftest import FakeMCPFactory
+    specs = (MCPServerSpec('local', command='fake'), MCPServerSpec('remote', transport='http', url='https://docs.example/mcp'))
+    monkeypatch.setattr('core.session.mcp_registry.registry', lambda *_: specs)
+    factory = FakeMCPFactory()
+    session = _session(repo, mcp_client_factory=factory)
+    session._agent.config.auto_tools = True
+    session._read_task_flow('read project conventions')
+    assert {s.name for s in session.mcp_specs()} == {'local', 'remote'}

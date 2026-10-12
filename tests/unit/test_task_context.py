@@ -72,3 +72,36 @@ def test_tool_read_range_reaches_task_beyond_file_prefix(tmp_path):
     text = '\n'.join(m['content'] for m in context.messages)
     assert 'TAIL_MARKER' in text
     assert '81:' in text
+
+
+def test_read_only_mcp_evidence_reaches_model_with_provenance(tmp_path):
+    from types import SimpleNamespace
+    flow = lambda _: (SimpleNamespace(server='platform-docs', tool='get_document',
+        arguments={'query':'API'}, text='DOC_EVIDENCE_MARKER https://docs.example/api'),)
+    context = TaskContextProvider(tmp_path, DOMAIN, read_flow=flow).collect('planning', 'fix API')
+    text = '\n'.join(m['content'] for m in context.messages)
+    assert 'DOC_EVIDENCE_MARKER' in text
+    assert 'platform-docs' in text and 'get_document' in text
+
+
+def test_tool_constraints_are_not_dropped_when_local_files_fill_budget(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from core import config
+    (tmp_path / 'large.cpp').write_text('x'*10000)
+    monkeypatch.setattr(config, 'TOOL_FLOW_CONTEXT_CHARS', 1000)
+    monkeypatch.setattr(config, 'CODE_FRAGMENT_MAX_CHARS', 1000)
+    flow = lambda _: (SimpleNamespace(server='docs', tool='read', arguments={}, text='MCP_REQUIRED_CONSTRAINT'),)
+    context = TaskContextProvider(tmp_path, DOMAIN, read_flow=flow).collect('planning', 'update project')
+    text = '\n'.join(m['content'] for m in context.messages)
+    assert 'MCP_REQUIRED_CONSTRAINT' in text
+
+
+def test_prior_patch_does_not_consume_fresh_tool_evidence_budget(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from core import config
+    monkeypatch.setattr(config, 'TOOL_FLOW_CONTEXT_CHARS', 1000)
+    change = SimpleNamespace(id='prior-change', task_number=1, status='applied', paths=(), patch='x'*2000)
+    flow = lambda _: (SimpleNamespace(server='docs', tool='read', arguments={}, text='MCP_REQUIRED_CONSTRAINT'),)
+    context = TaskContextProvider(tmp_path, DOMAIN, read_flow=flow).collect('execution', 'update project', changes=(change,))
+    text = '\n'.join(m['content'] for m in context.messages)
+    assert 'MCP_REQUIRED_CONSTRAINT' in text

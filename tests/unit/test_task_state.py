@@ -402,3 +402,10 @@ def test_undo_reopens_completed_task_without_automatic_execution():
     assert undone.current.patch_for(1).rolled_back
     assert task_state.next_item_index(undone.current) == 1
     assert task_state.rollback_change(undone, 'c' * 16) == undone
+
+
+def test_stop_preserves_legacy_request_id_without_tombstone(tmp_path):
+    state = TaskState(tasks=(TaskItem(4, 'goal', request_id='legacy-id'),), next_number=5)
+    store = TaskStore(tmp_path / 'task.json')
+    store.save(task_state.drop_all(state))
+    assert dict(store.load().request_ids)['legacy-id'] == 4

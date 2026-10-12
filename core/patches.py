@@ -77,7 +77,9 @@ class ParsedPatch:
 
 def _clean_path(raw: str) -> str:
     """Путь из заголовка патча без префиксов git и без служебного «/dev/null»."""
-    path = raw.strip().split("\t", 1)[0].strip()
+    path = raw.split("\t", 1)[0]
+    if not path.startswith('"') and path != path.strip():
+        raise PatchError("неоднозначные пробелы в пути: используйте quoted-путь")
     if path.startswith('"'):
         try:
             path = ast.literal_eval(path)
@@ -93,6 +95,31 @@ def _clean_path(raw: str) -> str:
         if path.startswith(prefix):
             return path[len(prefix) :]
     return path
+
+
+def _patch_lines(text):
+    """Distinguish actual headers from hunk content using Git's line counts."""
+    old_left = new_left = 0
+    for line in text.splitlines():
+        if old_left or new_left:
+            if line.startswith('\\ No newline at end of file'):
+                yield line, True
+                continue
+            if not line or line[0] not in ('+', '-', ' '):
+                raise PatchError('неверный контекст патча')
+            old_left -= int(line[0] in ('-', ' '))
+            new_left -= int(line[0] in ('+', ' '))
+            if old_left < 0 or new_left < 0:
+                raise PatchError('неверное число строк патча')
+            yield line, True
+            continue
+        match = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
+        if match:
+            old_left = int(match[2]) if match[2] is not None else 1
+            new_left = int(match[4]) if match[4] is not None else 1
+        yield line, False
+    if old_left or new_left:
+        raise PatchError('патч оборван')
 
 
 def parse(text: str) -> ParsedPatch:
@@ -127,7 +154,15 @@ def parse(text: str) -> ParsedPatch:
         current_path, added, removed, is_new = None, [], [], False
         old_path = new_path = ""
 
-    for line in text.splitlines():
+    for line, content in _patch_lines(text):
+        if content:
+            if current_path is None:
+                raise PatchError('патч не называет файл')
+            if line.startswith('+'):
+                added.append(line[1:])
+            elif line.startswith('-'):
+                removed.append(line[1:])
+            continue
         old = _OLD_PATH_RE.match(line)
         new = _NEW_PATH_RE.match(line)
         if old:
@@ -162,11 +197,16 @@ def parse(text: str) -> ParsedPatch:
 
 def validate_text_patch(text: str, root: Path) -> ParsedPatch:
     """Validate every header before git interprets it; permit text edits only."""
-    if re.search(r"^(GIT binary patch|Binary files |rename |copy |similarity index|.*mode (120000|160000))", text, re.M):
+    if re.search(r"^(GIT binary patch|Binary files |rename |copy |similarity index)", text, re.M):
         raise PatchError("binary, rename, copy и symlink-патчи не поддерживаются")
+    for mode in re.findall(r"^(?:new file|deleted file|old|new) mode (\S+)$", text, re.M):
+        if not re.fullmatch(r"[0-7]+", mode) or int(mode, 8) & 0o170000 != 0o100000:
+            raise PatchError("поддерживаются только обычные файлы")
     parsed = parse(text)
     headers = []
-    for line in text.splitlines():
+    for line, content in _patch_lines(text):
+        if content:
+            continue
         if line.startswith("diff --git "):
             raw = line[len("diff --git "):]
             if raw.startswith('"'):

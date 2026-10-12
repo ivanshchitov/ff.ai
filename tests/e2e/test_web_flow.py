@@ -261,14 +261,14 @@ def test_ask_goes_through_the_session_to_the_model(web: WebServer, stub):
     assert payload["answer"] == "Ответ stub-сервера."
     assert payload["meta"]["total_tokens"] == 150
     assert payload["sources"] == []
-    assert stub.call_count == 1
-    sent = stub.user_messages()[0]
+    assert stub.call_count == 2
+    sent = stub.user_messages()[1]
     assert "Где точка входа?" in sent
 
     status, usage = http_json(f"{web.url}/api/reports/usage")
     assert status == 200
-    assert any("Сессия: запросов — 1" in line for line in usage["lines"])
-    assert usage["data"]["session"]["total_tokens"] == 150
+    assert any("Сессия: запросов — 2" in line for line in usage["lines"])
+    assert usage["data"]["session"]["total_tokens"] == 300
 
 
 

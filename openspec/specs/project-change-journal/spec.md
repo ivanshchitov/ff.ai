@@ -1,7 +1,7 @@
 # project-change-journal Specification
 
 ## Purpose
-TBD - created by archiving change add-project-change-journal. Update Purpose after archive.
+Persist confirmed text changes and private snapshots outside the target project for conservative recovery.
 
 ## Requirements
 

@@ -75,6 +75,7 @@ class StubAPI:
         # Вычисляемый ответ: нужен там, где ответ зависит от запроса — например, на запрос оценки
         # кандидатов документации, где число и идентификаторы кандидатов знает только приложение.
         self._dynamic = None
+        self._routing = None
         self._lock = threading.Lock()
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -88,6 +89,11 @@ class StubAPI:
     def dynamic(self, builder) -> "StubAPI":
         """Ответ, вычисляемый по телу запроса: `builder(payload) -> Reply`."""
         self._dynamic = builder
+        return self
+
+    def routing(self, builder) -> "StubAPI":
+        """Configure semantic routing separately; all requests remain observable."""
+        self._routing = builder
         return self
 
     def sequence(self, *replies: Reply) -> "StubAPI":
@@ -128,6 +134,9 @@ class StubAPI:
     # --- жизненный цикл ---
 
     def _next_reply(self, payload: Optional[Dict[str, Any]] = None) -> Reply:
+        messages = (payload or {}).get('messages', [])
+        if messages and messages[0].get('content', '').startswith('Классифицируй'):
+            return self._routing(payload) if self._routing else answer('{"kind":"answer","goal":"","clarification":""}')
         if self._dynamic is not None:
             return self._dynamic(payload or {})
         with self._lock:

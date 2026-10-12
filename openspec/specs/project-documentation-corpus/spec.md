@@ -1,7 +1,7 @@
 # project-documentation-corpus Specification
 
 ## Purpose
-TBD - created by archiving change extend-project-corpus. Update Purpose after archive.
+Make local project documentation searchable alongside source code with stable path and line references.
 
 ## Requirements
 

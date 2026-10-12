@@ -215,7 +215,7 @@ const postJson = (path, body) =>
 
 // --- лента: сообщения, прокрутка --------------------------------------------------------------
 
-const state = { pendingSend: null, busy: false, stick: true, current: null, confirmations: new Map() };
+const state = { pendingSend: null, busy: false, stick: true, current: null, confirmations: new Map(), taskMessages: new Map(), taskSnapshots: new Map() };
 
 function atBottom() {
   const feed = el("feed");
@@ -384,6 +384,12 @@ async function ask(question) {
     renderCitations(entry, payload.citations);
     if (payload.kind === "task") {
       entry.node.dataset.taskNumber = payload.task_number;
+      state.taskMessages.set(payload.task_number, entry);
+      for (const card of state.confirmations.values()) {
+        if (card.dataset.taskNumber === String(payload.task_number)) entry.node.appendChild(card);
+      }
+      const snapshot = state.taskSnapshots.get(payload.task_number);
+      if (snapshot) updateTaskMessage(snapshot);
       loadReport("task");
     }
     if (!payload.answer) entry.bubble.classList.add("error");
@@ -422,6 +428,32 @@ async function runCommand(line) {
 
 // --- задача ----------------------------------------------------------------------------------
 
+function taskDetails(task) {
+  const lines = ["Задача " + task.number + ": " + task.title + " · " + task.status];
+  if (task.index_stale) lines.push("Индекс stale: используются текущие файлы; пересобрать — /rag-code index.");
+  for (const item of task.plan || []) {
+    if (item.change_id) lines.push("Изменение " + item.change_id + (item.rolled_back ? ": отменено" : item.applied ? ": применено" : ": не применено"));
+    if (item.reason) lines.push(item.reason);
+  }
+  for (const change of task.changes || []) {
+    lines.push(change.id + " · " + change.status + (change.reason ? ": " + change.reason : ""));
+    lines.push(...(change.validation || []));
+  }
+  lines.push(...(task.issues || []));
+  return lines.join("\n");
+}
+
+function updateTaskMessage(task) {
+  state.taskSnapshots.set(task.number, task);
+  const entry = state.taskMessages.get(task.number);
+  if (!entry) return;
+  if (!entry.taskReport) {
+    entry.taskReport = textNode("pre", "lines", "");
+    entry.node.appendChild(entry.taskReport);
+  }
+  entry.taskReport.textContent = taskDetails(task);
+}
+
 function renderTask(snapshot, running) {
   const host = el("task");
   clear(host);
@@ -432,6 +464,7 @@ function renderTask(snapshot, running) {
     return;
   }
   for (const task of tasks) {
+    updateTaskMessage(task);
     const card = document.createElement("div");
     const current = snapshot && snapshot.current === task.number;
     card.className = "task-card" + (current ? " current" : "");
@@ -451,17 +484,24 @@ function renderTask(snapshot, running) {
       for (const item of plan) {
         const li = document.createElement("li");
         li.className = "task-item" + (item.applied ? " applied" : "");
-        li.textContent = (item.applied ? "[x] " : "[ ] ") + item.item;
+        li.textContent = (item.applied ? "[x] " : "[ ] ") + item.item +
+          (item.change_id ? " · " + item.change_id : "") +
+          (item.rolled_back ? " · отменено" : "") + (item.reason ? " · " + item.reason : "");
         list.appendChild(li);
       }
       card.appendChild(list);
+    }
+    if (task.index_stale) card.appendChild(textNode("div", "task-line", "Индекс stale: читаются текущие файлы."));
+    for (const change of task.changes || []) {
+      card.appendChild(textNode("div", "task-line", change.id + " · " + change.status + (change.reason ? ": " + change.reason : "")));
+      for (const line of change.validation || []) card.appendChild(textNode("div", "task-line", line));
     }
     host.appendChild(card);
   }
 }
 
 function editsCard(event) {
-  const entry = message("assistant");
+  const entry = state.taskMessages.get(event.data?.current) || message("assistant");
   const card = document.createElement("div");
   card.className = "confirm";
   card.appendChild(textNode("div", "confirm-kind", "Правки плана"));
@@ -500,10 +540,11 @@ function editsCard(event) {
 // --- подтверждения ---------------------------------------------------------------------------
 
 function confirmationCard(payload) {
-  const entry = message("assistant");
+  const entry = state.taskMessages.get(payload.task_number) || message("assistant");
   const card = document.createElement("div");
   card.className = "confirm";
   card.dataset.confirmation = payload.id;
+  if (payload.task_number != null) card.dataset.taskNumber = payload.task_number;
   card.appendChild(textNode("div", "confirm-kind", CONFIRMATION_LABELS[payload.kind] || payload.kind));
   card.appendChild(textNode("div", "confirm-summary", payload.summary || ""));
   if (payload.detail) {
@@ -627,7 +668,8 @@ function handleEvent(event) {
       setPhase(PHASE_LABELS[event.phase] || event.phase);
       break;
     case "journal":
-      addJournal(event.text);
+      if (state.taskMessages.has(event.task_number)) addJournalTo(state.taskMessages.get(event.task_number), event.text);
+      else addJournal(event.text);
       break;
     case "domain":
       loadStatus();

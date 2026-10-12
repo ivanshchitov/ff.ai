@@ -84,7 +84,7 @@ def test_spec_that_removes_a_required_field_is_caught(tmp_path: Path):
     (root / "rpm" / "app.spec").write_text(
         "Name: app\nVersion: 1\n%files\n%{_bindir}/app\n", encoding="utf-8"
     )
-    text = "--- a/rpm/app.spec\n+++ b/rpm/app.spec\n@@ -3,2 +3,1 @@\n-%files\n-%{_bindir}/app\n"
+    text = "--- a/rpm/app.spec\n+++ b/rpm/app.spec\n@@ -3,2 +2,0 @@\n-%files\n-%{_bindir}/app\n"
     result = domain_checks.check_patch(text, root, CHECKS)
     assert not result.ok
     assert "%files" in result.issues[0].detail

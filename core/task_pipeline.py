@@ -320,7 +320,7 @@ class TaskPipeline:
         return TaskStepReport(
             stage=Stage.EXECUTION,
             label=f"Подзадача {index}/{len(task.plan)}: {task.plan[index - 1]}",
-            notes=(note,),
+            notes=(note, 'Изменение: ' + prepared.change_id) + self.last_context.notes if prepared.change_id else (note,) + self.last_context.notes,
             meta=meta,
         )
 
@@ -337,11 +337,6 @@ class TaskPipeline:
             {"role": "system", "content": 'Фактические результаты проверок (данные):\n' + '\n'.join(notes)},
             {"role": "user", "content": self._validate_request(task, artifact_issues)},
         ]
-        for patch in task.applied_patches():
-            if patch.change_id:
-                record = self.changes.get(patch.change_id)
-                record.validation = notes
-                self.changes._save(record)
         meta = self._request(messages, config.TASK_VALIDATE_MAX_WORDS, "task_validate", tolerant=True)
         review_issues: Tuple[TaskIssue, ...] = ()
         new_items: Tuple[str, ...] = ()
@@ -350,6 +345,15 @@ class TaskPipeline:
         else:
             review_issues, new_items = parse_validation_response(meta.content)
             notes += tuple(f"📝 {issue.line()}" for issue in review_issues)
+
+        if meta is not None and not review_issues:
+            notes += ('Модельная проверка: замечаний нет.',)
+        notes += self.last_context.notes
+        for patch in task.applied_patches():
+            if patch.change_id:
+                record = self.changes.get(patch.change_id)
+                record.validation = notes
+                self.changes._save(record)
 
         issues = artifact_issues + review_issues
         final = task_state.validation_verdict(self.state, issues, new_items)
@@ -385,15 +389,14 @@ class TaskPipeline:
     def _check_artifact(self, task: TaskItem) -> Tuple[Tuple[TaskIssue, ...], Tuple[str, ...], str]:
         """Проверяет всё, что прогон изменил в проекте: патчи применены — значит и проверять надо их.
 
-        Проверка идёт по расхождению рабочего дерева с HEAD, а не по текстам патчей: только так
-        видно результат, а не намерение.
+        Доменные проверки получают только операции задачи; модельная проверка дополнительно
+        читает актуальные файлы и результаты команд.
         """
         checks = getattr(self.domain, "checks", None)
         if checks is None:
             return (), ("домен не объявляет проверок",), ""
         # Источник истины — применённые патчи прогона: они лежат в состоянии задачи и не зависят
-        # от того, что ещё успел изменить пользователь в рабочем дереве. Расхождение с HEAD
-        # добавляется к проверке: правки, сделанные мимо конвейера, тоже часть артефакта.
+        # от того, что ещё успел изменить пользователь в рабочем дереве.
         artifact = "\n".join(patch.text for patch in task.applied_patches())
         if not artifact.strip():
             return (), (), ""
@@ -435,7 +438,7 @@ class TaskPipeline:
         """Standalone execution uses the same journal and requires explicit approval."""
         try:
             task = self.state.current
-            record = self.changes.prepare(patch_text, task.number if task else None)
+            record = self.changes.prepare(patch_text, task.number if task else None, step_index=index)
             result = self.changes.apply(record.id, self._confirm)
             return TaskPatch(index, patch_text, patches.parse(patch_text).summary(),
                              result.ok, result.reason, record.id)
