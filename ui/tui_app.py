@@ -156,7 +156,19 @@ class DevAssistantTUI:
         if command == "/branches":
             self._open_branches_screen()
             return
-        result = self.session.run_command(line)
+        if command == "/help":
+            if not self._ensure_api_key():
+                return
+            try:
+                result = self._ask_with_spinner(line, command=True)
+            except APIError as error:
+                self.console.print(f"[bold red]Ошибка запроса: {escape(str(error))}[/bold red]")
+                return
+            if result.answer is not None:
+                self._render_answer(result.answer)
+                return
+        else:
+            result = self.session.run_command(line)
         for text in result.lines:
             self.console.print(escape(text))
         if result.domain_changed:
@@ -180,6 +192,9 @@ class DevAssistantTUI:
                 self._run_task()
             return
         answer = submission.answer
+        self._render_answer(answer)
+
+    def _render_answer(self, answer) -> None:
         self._print_answer(answer.text)
         self._print_journal()
         self._print_sources()
@@ -192,7 +207,7 @@ class DevAssistantTUI:
         self._print_usage_meta(answer.meta)
         self._print_schedule_announcement()
 
-    def _ask_with_spinner(self, question: str):
+    def _ask_with_spinner(self, question: str, command: bool = False):
         """Вопрос под спиннером: фазы приходят событиями сессии, журнал собирается на экран."""
         self._journal = []
         with self.console.status(PHASE_LABELS[RequestPhase.REQUEST], spinner="dots") as status:
@@ -205,7 +220,7 @@ class DevAssistantTUI:
 
             unsubscribe = self.session.subscribe(listener)
             try:
-                return self.session.submit(question)
+                return self.session.run_command(question) if command else self.session.submit(question)
             finally:
                 unsubscribe()
 

@@ -346,6 +346,16 @@ openspec validate --all --strict                           # проверка с
 `/context`, `/usage`, `/domain`, `/exit`; их поведение описано спецификациями `answer-formats`,
 `settings-screen`, `model-selection`, `context-strategies`, `history-persistence`,
 `usage-accounting`, `terminal-ui`, `test-infrastructure`.
+`/help [вопрос]` — ответ о проекте без классификатора разработки и без создания задачи.
+Использует существующий локальный корпус (предварительно `/rag-code index`) и свежий
+MCP `repo_git` собственного сервера с `status --short --branch`; не заменяет отказ MCP
+локальным вызовом git. Поиск портала и автовыбор инструментов отключены только на время
+этого запроса, локальный поиск включён; все настройки восстанавливаются в finally.
+`CommandResult.answer` несёт ответ, источники и метрики отображаются обоими интерфейсами.
+Имя MCP-инструмента и аргументы `/help` — данные `assets/project_help.json`.
+Перед `/help` корпус сверяется с актуальными файлами; ручные изменения требуют пересборки.
+MCP-команды используют `GIT_OPTIONAL_LOCKS=0`, чтобы чтение status не обновляло git-index.
+Контракт: `project-help`; сценарий дня 31 — `docs/day31-project-help.md`.
 Расписание: `/schedule` — снимок заданий и прогонов; задания выполняет `ff-ai-scheduler.py`
 (`--once` для одного прохода), а приложение объявляет о новых прогонах после ответа.
 Локальная модель: пресеты из `llama_server/models.ini`; автозапуск выключается `FFAI_LLAMA_AUTOSTART=0`

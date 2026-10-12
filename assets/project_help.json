@@ -1,0 +1,4 @@
+{
+  "tool": "repo_git",
+  "arguments": {"args": "status --short --branch"}
+}

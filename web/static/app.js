@@ -406,13 +406,27 @@ async function ask(question) {
 }
 
 async function runCommand(line) {
+  if (state.busy) return;
+  const help = line.trim().split(/\s+/)[0] === "/help";
+  if (help) {
+    state.busy = true;
+    el("send").disabled = true;
+  }
   userMessage(line);
-  const entry = message("assistant");
+  const entry = help ? assistantStart() : message("assistant");
   entry.bubble.classList.add("command");
   try {
     const payload = await postJson("api/command", { text: line });
     const lines = payload.lines || [];
-    entry.body.appendChild(markup(lines.join("\n") || "Команда выполнена."));
+    if (payload.answer !== undefined) {
+      entry.body.replaceChildren(markup(payload.answer));
+      for (const text of lines) addJournalTo(entry, text);
+      renderMeta(entry, payload.meta);
+      renderSources(entry, payload.sources);
+      renderCitations(entry, payload.citations);
+    } else {
+      entry.body.appendChild(markup(lines.join("\n") || "Команда выполнена."));
+    }
     if (payload.unknown) addNote(entry, "команда неизвестна");
     if (payload.domain_changed) await loadStatus();
     if (payload.task_run_started) addNote(entry, "прогон задачи запущен");
@@ -422,6 +436,13 @@ async function runCommand(line) {
   } catch (error) {
     entry.bubble.classList.add("error");
     entry.body.replaceChildren(textNode("p", "md-p", "Ошибка команды: " + error.message));
+  } finally {
+    if (help) {
+      if (entry.phase) entry.phase.remove();
+      assistantFinish(entry);
+      state.busy = false;
+      el("send").disabled = false;
+    }
   }
   stickToBottom(true);
 }

@@ -811,6 +811,14 @@ def create_app(
             "task_run": result.task_run,
             "profile_setup": result.profile_setup,
         }
+        if result.answer is not None:
+            body.update({
+                "question": result.answer.question,
+                "answer": result.answer.text,
+                "meta": to_jsonable(result.answer.meta),
+                "sources": _sources_payload(session),
+                "citations": citations_payload(session.last_citations),
+            })
         # `/task run` в TUI ведёт интерфейс; здесь прогон ведёт фоновый исполнитель.
         body["task_run_started"] = runner.start() if result.task_run else False
         bus.publish({"type": "command", "data": body})

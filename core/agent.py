@@ -274,6 +274,7 @@ class RepoAgent:
         self,
         question: str,
         on_phase: Optional[Callable[[RequestPhase], None]] = None,
+        request_context: str = "",
     ) -> AnswerMeta:
         """Задаёт вопрос с контекстом сессии; при ошибке API поднимает `APIError`.
 
@@ -289,6 +290,8 @@ class RepoAgent:
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
+        if request_context:
+            messages.insert(1, {"role": "system", "content": request_context})
         meta = self._ask_question(messages)
         self._refresh_schedule()
         meta = self._enforce_invariants(messages, meta, on_phase)

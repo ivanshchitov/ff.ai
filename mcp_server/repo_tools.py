@@ -426,6 +426,7 @@ def _command_env() -> Dict[str, str]:
     }
     env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
 
 
