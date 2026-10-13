@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import difflib
 import re
 import subprocess
 import tempfile
@@ -52,7 +53,9 @@ _BEARER = re.compile(r'(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]{8,}=*')
 def redact(text: str) -> str:
     patterns = json.loads((config.ASSETS_DIR / 'pr_review_redaction.json').read_text())
     clean = _BEARER.sub(r'\1[REDACTED]', _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', text))
-    return re.sub(patterns['private_key'], '[REDACTED PRIVATE KEY]', clean, flags=re.S)
+    return re.sub(patterns['private_key'],
+                  lambda match: '\n'.join('[REDACTED PRIVATE KEY]' for _ in match.group().split('\n')),
+                  clean, flags=re.S)
 
 
 def _allowed(path: str, corpus) -> bool:
@@ -168,36 +171,88 @@ def retrieve_context(snapshot: Path, corpus, changes: Changes, index_dir: Path):
         ('code', tuple(x for x in corpus.include_extensions if x != '.md'), '')):
         rules = replace(corpus, include_extensions=extensions)
         database = index_dir / (kind + '.sqlite')
-        code_index.build_index(snapshot, rules, corpus.strategy, database)
+        indexed = code_index.build_index(snapshot, rules, corpus.strategy, database)
+        search_query = query + '\n' + extra
+        count = 4
+        if kind == 'documentation':
+            search_query = ' '.join(f.path for f in changes.files) + '\n' + extra
+            count = max(4, indexed.chunks)
         report = code_retrieval.CodeRetriever(database, rules, ranking='tokens').search(
-            query + '\n' + extra, mode='baseline', before=12, after=4)
+            search_query, mode='baseline', before=max(12, count), after=count)
         if not report.fragments:
             limitations.append({'kind': kind, 'reason': 'подходящих RAG-фрагментов нет'})
+        seen = set()
         for fragment in report.fragments:
-            sources.append({'kind': kind, 'path': re.sub(r':L\d+-L\d+$', '', fragment.source),
+            source_path = re.sub(r':L\d+-L\d+$', '', fragment.source)
+            if kind == 'documentation' and source_path in seen:
+                continue
+            seen.add(source_path)
+            sources.append({'kind': kind, 'path': source_path,
                             'identifier': fragment.identifier,
                             'start_line': fragment.start_line, 'end_line': fragment.end_line,
                             'text': fragment.text, 'truncated': fragment.truncated})
+            if len([s for s in sources if s['kind'] == kind]) == 4:
+                break
     return sources, limitations
 
 
 def _review_input(root, changes, corpus, snapshot, sources, limitations):
-    paths = sorted({path for f in changes.files for path in (f.path, f.old_path)
-                    if path and _allowed(path, corpus)})
-    diff = ''
-    if paths:
-        diff = redact(_git(root, 'diff', '--no-ext-diff', '--no-textconv', '--no-color',
-                           '-M', changes.merge_base, changes.head, '--', *paths)
-                      .decode('utf-8', errors='replace'))
+    def original_text(path):
+        if not _allowed(path, corpus):
+            return ''
+        entries = _git(root, 'ls-tree', '-z', '-l', changes.merge_base, '--', path).split(b'\0')
+        for entry in entries:
+            if not entry:
+                continue
+            metadata, raw_path = entry.split(b'\t', 1)
+            mode, kind, oid, size = metadata.split()
+            if raw_path.decode('utf-8') != path:
+                continue
+            if mode not in (b'100644', b'100755') or kind != b'blob' or int(size) > corpus.max_file_bytes:
+                limitations.append({'path': path, 'reason': 'содержимое base недоступно в корпусе'})
+                return ''
+            data = _git(root, 'cat-file', 'blob', oid.decode('ascii'))
+            try:
+                text = data.decode('utf-8')
+                if '\0' in text:
+                    raise UnicodeError()
+            except UnicodeError:
+                limitations.append({'path': path, 'reason': 'содержимое base не является UTF-8 текстом'})
+                return ''
+            clean = redact(text)
+            if clean != text:
+                limitations.append({'path': path, 'reason': 'литеральные учётные данные base скрыты'})
+            return clean
+        return ''
+
+    diffs = []
     content = {}
     for item in changes.files:
         path = snapshot / item.path
+        after = ''
         if _allowed(item.path, corpus) and path.is_file():
-            content[item.path] = path.read_text(encoding='utf-8')
+            after = content[item.path] = path.read_text(encoding='utf-8')
         elif not item.status.startswith('D'):
             limitations.append({'path': item.path, 'reason': 'содержимое head недоступно в корпусе'})
+        before_path = item.old_path or item.path
+        before = original_text(before_path)
+        if before or after:
+            # Redact complete blobs before diffing: a middle hunk of a key has no delimiters.
+            diff = ''.join(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n'
+                           for line in difflib.unified_diff(
+                               before.splitlines(keepends=True), after.splitlines(keepends=True),
+                               fromfile='a/' + before_path, tofile='b/' + item.path))
+            diffs.append(f'diff --git {json.dumps("a/" + before_path)} {json.dumps("b/" + item.path)}\n'
+                         + f'status: {item.status}\n' + diff)
+    allowed_paths = sorted({path for item in changes.files for path in (item.path, item.old_path)
+                            if path and _allowed(path, corpus)})
+    if allowed_paths:
+        metadata = _git(root, 'diff', '--no-ext-diff', '--no-textconv', '--summary', '-M',
+                        changes.merge_base, changes.head, '--', *allowed_paths).decode('utf-8')
+        if metadata:
+            diffs.append('Git metadata:\n' + redact(metadata))
     return dict(base=changes.base, head=changes.head, merge_base=changes.merge_base,
-                files=[asdict(f) for f in changes.files], diff=diff,
+                files=[asdict(f) for f in changes.files], diff=''.join(diffs),
                 changed_content=content, sources=sources, limitations=limitations)
 
 
@@ -206,6 +261,9 @@ def run_review(root: Path, base: str, head: str, domain, output: Path, client,
     """Execute the same pipeline in CI and locally; reports survive failed stages."""
     limits = limits or Limits()
     root, output = Path(root).resolve(), Path(output).resolve()
+    toplevel = Path(_git(root, 'rev-parse', '--show-toplevel').decode('utf-8').strip()).resolve()
+    if root != toplevel:
+        raise ReviewError('Укажите корневой каталог git-репозитория.')
     if output.is_relative_to(root):
         raise ReviewError('Каталог результатов должен находиться вне проекта.')
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -262,6 +320,10 @@ def run_review(root: Path, base: str, head: str, domain, output: Path, client,
                                                        temperature=0.1, model=model)
             except APIError as exc:
                 raise ReviewError('API модели недоступен; ревью не выполнено.') from exc
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                raise ReviewError('API модели вернул непригодные данные; ревью не выполнено.') from exc
+            if not isinstance(meta.content, str):
+                raise ReviewError('API модели вернул непригодный текст; ревью не выполнено.')
             report['usage'] = asdict(meta)
             report['usage'].pop('content')
             text = redact(meta.content.strip())

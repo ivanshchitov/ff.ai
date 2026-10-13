@@ -243,9 +243,97 @@ def test_cli_runs_real_http_pipeline_and_returns_failure_code(project, tmp_path)
         assert result.returncode == 0, result.stderr
         assert (output / 'review.md').exists()
         assert json.loads((output / 'report.json').read_text())['status'] == 'ok'
+        from tests.e2e.stub_api import Reply
+        api.always(Reply(raw_body='{"choices":[{"message":{"content":null}}]}'))
+        malformed_output = tmp_path / 'malformed-review'
+        malformed = subprocess.run([*args[:-1], str(malformed_output)], capture_output=True,
+                                   text=True, env=env, timeout=30)
+        assert malformed.returncode == 1 and 'Traceback' not in malformed.stderr
+        assert json.loads((malformed_output / 'report.json').read_text())['status'] == 'failed'
         result = subprocess.run([*args[:-1], str(tmp_path / 'bad-review'), '--head', 'missing'],
                                 capture_output=True, text=True, env=env, timeout=30)
         assert result.returncode == 1
         assert json.loads((tmp_path / 'bad-review/report.json').read_text())['status'] == 'failed'
     finally:
         api.stop()
+
+
+def test_partial_key_diff_is_redacted_and_snapshot_preserves_original_lines(project, tmp_path):
+    from core.pr_review import run_review
+    root, _, _ = project
+    key = ('-----BEGIN PRIVATE KEY-----\n' + '\n'.join(f'SENSITIVE_BODY_{n}' for n in range(20))
+           + '\n-----END PRIVATE KEY-----\nvoid after_key() {}\n')
+    (root / 'key.conf').write_text(key)
+    base = commit(root)
+    (root / 'key.conf').write_text(key.replace('SENSITIVE_BODY_10', 'NEW_SENSITIVE_BODY_10'))
+    head = commit(root)
+    client = ReviewClient()
+    run_review(root, base, head, domains.load_domain('aurora-qt5'), tmp_path / 'review', client, 'test-model')
+    request = json.loads(client.calls[-1][-1]['content'])
+    assert 'SENSITIVE_BODY' not in json.dumps(request)
+    assert len(request['changed_content']['key.conf'].splitlines()) == 23
+    assert request['changed_content']['key.conf'].splitlines()[22] == 'void after_key() {}'
+
+
+def test_subdirectory_input_cannot_write_elsewhere_in_repository(project):
+    from core.pr_review import ReviewError, run_review
+    root, base, head = project
+    with pytest.raises(ReviewError, match='корн'):
+        run_review(root / 'docs', base, head, domains.load_domain('aurora-qt5'),
+                   root / 'results', ReviewClient(), 'test-model')
+    assert not (root / 'results').exists()
+
+
+@pytest.mark.parametrize('client', [ReviewClient(None), ReviewClient(error=ValueError('SENSITIVE malformed API'))])
+def test_malformed_api_content_records_failed_stage(project, tmp_path, client):
+    from core.pr_review import ReviewError, run_review
+    root, base, head = project
+    output = tmp_path / 'review'
+    with pytest.raises(ReviewError):
+        run_review(root, base, head, domains.load_domain('aurora-qt5'), output, client, 'test-model')
+    report = json.loads((output / 'report.json').read_text())
+    assert report['status'] == 'failed' and report['stages'][-1]['status'] == 'failed'
+    assert 'SENSITIVE' not in json.dumps(report)
+
+
+def test_diff_separates_changed_lines_without_final_newline(project, tmp_path):
+    from core.pr_review import run_review
+    root, _, _ = project
+    (root / 'transfer.cpp').write_text('return false;')
+    base = commit(root)
+    (root / 'transfer.cpp').write_text('return true;')
+    head = commit(root)
+    client = ReviewClient()
+    run_review(root, base, head, domains.load_domain('aurora-qt5'), tmp_path / 'review', client, 'test-model')
+    diff = json.loads(client.calls[-1][-1]['content'])['diff']
+    assert '-return false;\n' in diff and '+return true;\n' in diff
+    assert '\\ No newline at end of file' in diff
+
+
+def test_review_receives_file_mode_changes(project, tmp_path):
+    from core.pr_review import run_review
+    root, _, _ = project
+    script = root / 'run.sh'
+    script.write_text('#!/bin/sh\nexit 0\n')
+    script.chmod(0o755)
+    base = commit(root)
+    script.chmod(0o644)
+    head = commit(root)
+    client = ReviewClient()
+    run_review(root, base, head, domains.load_domain('aurora-qt5'), tmp_path / 'review', client, 'test-model')
+    diff = json.loads(client.calls[-1][-1]['content'])['diff']
+    assert '100755' in diff and '100644' in diff
+
+
+def test_documentation_quota_is_not_consumed_by_one_long_readme(project, tmp_path):
+    from core.pr_review import collect_changes, prepare_snapshot, retrieve_context
+    root, base, _ = project
+    (root / 'README.md').write_text(('Project structure: upload transfer path valid operation.\n' * 500))
+    head = commit(root)
+    corpus = domains.load_domain('aurora-qt5').corpus
+    changes = collect_changes(root, base, head)
+    snapshot, _ = prepare_snapshot(root, changes, corpus, tmp_path / 'snapshot')
+    sources, _ = retrieve_context(snapshot, corpus, changes, tmp_path / 'index')
+    documents = [s for s in sources if s['kind'] == 'documentation']
+    assert any(s['path'] == 'docs/conventions.md' for s in documents)
+    assert len([s for s in documents if s['path'] == 'README.md']) == 1
