@@ -13,14 +13,21 @@ from core import domains
 from core.api_client import APIError, AnswerMeta
 
 
-REVIEW = ('## Потенциальные баги\n'
-          'transfer.cpp:L1: Проверка path.valid() удалена, недопустимый путь принят.\n'
-          '## Архитектурные проблемы\nНе обнаружены.\n'
-          '## Рекомендации\nВернуть проверку согласно docs/conventions.md:L1-L1.\n')
+REVIEW_DATA = {'potential_bugs': [{'severity': 'high', 'path': 'transfer.cpp',
+    'start_line': 1, 'end_line': 1, 'description': 'Проверка path.valid() удалена, недопустимый путь принят.',
+    'recommendation': 'Вернуть проверку.'}], 'architectural_problems': [],
+    'recommendations': ['Вернуть проверку согласно docs/conventions.md:L1-L1.']}
+MODEL_REPLY = json.dumps(REVIEW_DATA, ensure_ascii=False)
+EMPTY_REPLY = json.dumps({'potential_bugs': [], 'architectural_problems': [], 'recommendations': []})
+REVIEW = ('## Потенциальные баги\n\n'
+          '- **high** — `transfer.cpp:L1-L1`: Проверка path.valid() удалена, недопустимый путь принят.\n'
+          '  Исправление: Вернуть проверку.\n\n'
+          '## Архитектурные проблемы\n\nНе обнаружены.\n\n'
+          '## Рекомендации\n\n- Вернуть проверку согласно docs/conventions.md:L1-L1.\n')
 
 
 class ReviewClient:
-    def __init__(self, text=REVIEW, finish='stop', error=None):
+    def __init__(self, text=MODEL_REPLY, finish='stop', error=None):
         self.text, self.finish, self.error = text, finish, error
         self.calls = []
 
@@ -205,7 +212,8 @@ def test_review_redacts_credentials_in_diff_context_and_model_output(project, tm
     (root / 'secret.cpp').write_text('const char *CLIENT_SECRET = "credential-fixture";\n')
     (root / '.env').write_text('DO_NOT_SEND=credential-fixture\n')
     head = commit(root)
-    client = ReviewClient(REVIEW + '\nCLIENT_SECRET = "credential-fixture";')
+    client = ReviewClient(json.dumps({**REVIEW_DATA, 'recommendations': [
+        *REVIEW_DATA['recommendations'], 'CLIENT_SECRET = "credential-fixture";']}))
     output = tmp_path / 'review'
     run_review(root, base, head, domains.load_domain('aurora-qt5'), output, client, 'test-model')
     assert 'credential-fixture' not in json.dumps(client.calls)
@@ -231,7 +239,7 @@ def test_cli_runs_real_http_pipeline_and_returns_failure_code(project, tmp_path)
     from tests.e2e.stub_api import StubAPI, answer
     root, base, head = project
     entry = Path(__file__).resolve().parents[2] / 'ff-ai-review.py'
-    api = StubAPI().always(answer(REVIEW))
+    api = StubAPI().always(answer(MODEL_REPLY))
     api_url = api.start()
     try:
         env = dict(os.environ, OPENCODE_API_KEY='test-key', OPENCODE_API_URL=api_url,
@@ -267,7 +275,7 @@ def test_partial_key_diff_is_redacted_and_snapshot_preserves_original_lines(proj
     base = commit(root)
     (root / 'key.conf').write_text(key.replace('SENSITIVE_BODY_10', 'NEW_SENSITIVE_BODY_10'))
     head = commit(root)
-    client = ReviewClient()
+    client = ReviewClient(EMPTY_REPLY)
     run_review(root, base, head, domains.load_domain('aurora-qt5'), tmp_path / 'review', client, 'test-model')
     request = json.loads(client.calls[-1][-1]['content'])
     assert 'SENSITIVE_BODY' not in json.dumps(request)
@@ -319,7 +327,7 @@ def test_review_receives_file_mode_changes(project, tmp_path):
     base = commit(root)
     script.chmod(0o644)
     head = commit(root)
-    client = ReviewClient()
+    client = ReviewClient(EMPTY_REPLY)
     run_review(root, base, head, domains.load_domain('aurora-qt5'), tmp_path / 'review', client, 'test-model')
     diff = json.loads(client.calls[-1][-1]['content'])['diff']
     assert '100755' in diff and '100644' in diff

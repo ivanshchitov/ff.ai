@@ -256,6 +256,45 @@ def _review_input(root, changes, corpus, snapshot, sources, limitations):
                 changed_content=content, sources=sources, limitations=limitations)
 
 
+def parse_review_findings(content: str, known_paths: set[str]):
+    """Validate model data and derive both Markdown and the merge decision."""
+    fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', content.strip(), re.S)
+    try:
+        data = json.loads(fenced.group(1) if fenced else content)
+    except (ValueError, TypeError):
+        raise ReviewError('Ответ модели не является JSON ревью.') from None
+    names = ('potential_bugs', 'architectural_problems', 'recommendations')
+    if not isinstance(data, dict) or set(data) != set(names) or any(
+            not isinstance(data[name], list) for name in names):
+        raise ReviewError('Ответ модели не содержит списки замечаний ревью.')
+    for name in names[:2]:
+        for finding in data[name]:
+            if (not isinstance(finding, dict)
+                or finding.get('severity') not in ('critical', 'high', 'medium', 'low')
+                or finding.get('path') not in known_paths
+                or type(finding.get('start_line')) is not int
+                or type(finding.get('end_line')) is not int
+                or not 1 <= finding['start_line'] <= finding['end_line']
+                or any(not isinstance(finding.get(field), str) or not finding[field].strip()
+                       for field in ('description', 'recommendation'))):
+                raise ReviewError('Непригодное замечание модели: путь, строки или содержание.')
+            finding['description'] = redact(finding['description'])
+            finding['recommendation'] = redact(finding['recommendation'])
+    if any(not isinstance(item, str) or not item.strip() for item in data['recommendations']):
+        raise ReviewError('Непригодный список рекомендаций модели.')
+    data['recommendations'] = [redact(item) for item in data['recommendations']]
+    blocks = []
+    for title, name in zip(('Потенциальные баги', 'Архитектурные проблемы'), names[:2]):
+        lines = [f'- **{item["severity"]}** — `{item["path"]}:L{item["start_line"]}-L{item["end_line"]}`: '
+                 f'{item["description"]}\n  Исправление: {item["recommendation"]}' for item in data[name]]
+        blocks.append('## ' + title + '\n\n' + ('\n\n'.join(lines) or 'Не обнаружены.'))
+    blocks.append('## Рекомендации\n\n' + ('\n'.join('- ' + s for s in data['recommendations'])
+                                           or 'Нет рекомендаций.'))
+    counts = {name: len(data[name]) for name in names[:2]}
+    gate = {'status': 'blocked' if any(counts.values()) else 'passed', **counts}
+    return data, '\n\n'.join(blocks) + '\n', gate
+
+
 def run_review(root: Path, base: str, head: str, domain, output: Path, client,
                model: str, limits: Limits | None = None, on_stage=None) -> dict:
     """Execute the same pipeline in CI and locally; reports survive failed stages."""
@@ -326,15 +365,11 @@ def run_review(root: Path, base: str, head: str, domain, output: Path, client,
                 raise ReviewError('API модели вернул непригодный текст; ревью не выполнено.')
             report['usage'] = asdict(meta)
             report['usage'].pop('content')
-            text = redact(meta.content.strip())
-            headings = ('Потенциальные баги', 'Архитектурные проблемы', 'Рекомендации')
-            for heading in headings:
-                section = re.search(r'^#{1,3}[ \t]+' + heading +
-                                    r'[ \t]*\n(.*?)(?=^#{1,3}[ \t]+|\Z)', text, re.M | re.S)
-                if section is None or not section.group(1).strip():
-                    raise ReviewError('Ответ модели не содержит обязательные разделы ревью.')
             if meta.finish_reason not in ('stop', None):
                 raise ReviewError('Ответ модели не завершён; ревью не выполнено полностью.')
+            known_paths = {item.path for item in changes.files} | {s['path'] for s in sources}
+            findings, text, gate = parse_review_findings(meta.content, known_paths)
+            report.update(findings=findings, gate=gate)
             if invariants.check_answer(text, domain.invariants):
                 raise ReviewError('Ответ модели нарушает правила домена.')
             source_lines = '\n'.join(f'- {s["kind"]}: {s["identifier"]}' for s in sources)
