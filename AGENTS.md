@@ -364,6 +364,12 @@ MCP-команды используют `GIT_OPTIONAL_LOCKS=0`, чтобы чт�
 результат не перезаписывается. Данные PR не исполняются. Reusable workflow —
 `.github/workflows/pr-review.yml`, caller — `examples/webdavclient-ai-review.yml`.
 Сценарий и настройка дня 32 — `docs/day32-pr-review.md`; контракт — `pr-review-pipeline`.
+Модель ревью возвращает JSON списков potential_bugs/architectural_problems/recommendations;
+Markdown и gate строятся кодом. `scripts/post_pr_review.py` публикует один комментарий
+github-actions[bot], сверяя текущий head и сохраняя чужие комментарии. Job публикации
+имеет pull-requests: write, анализ — только contents: read. `scripts/check_review_gate.py`
+возвращает ошибку при багах, архитектурных проблемах или недоступном ревью. Подключённая
+основная ветка требует успешный AI review gate; после исправлений нужен новый прогон.
 Расписание: `/schedule` — снимок заданий и прогонов; задания выполняет `ff-ai-scheduler.py`
 (`--once` для одного прохода), а приложение объявляет о новых прогонах после ответа.
 Локальная модель: пресеты из `llama_server/models.ini`; автозапуск выключается `FFAI_LLAMA_AUTOSTART=0`

@@ -7,7 +7,7 @@ on:
         description: Trusted ff.ai implementation commit
         required: false
         type: string
-        default: 4720a3fe3ceacf67397961681a655c4d3d6ee5d0
+        default: 51dad9e7e962568b077c8f17731241e58833a496
       domain:
         required: false
         type: string
@@ -27,6 +27,8 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout trusted ff.ai
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -89,3 +91,76 @@ jobs:
           path: ${{ runner.temp }}/ffai-review/
           if-no-files-found: warn
           retention-days: 7
+
+  publish_comment:
+    name: Publish PR review
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ivanshchitov/ff.ai
+          ref: ${{ inputs.ffai_ref }}
+          path: ffai
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Download review
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ffai-pr-review-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: review-result
+      - name: Publish or update the PR comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_REPOSITORY: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python ffai/scripts/post_pr_review.py --repository "$REVIEW_REPOSITORY" \
+            --pr "$REVIEW_PR" --review review-result/review.md --report review-result/report.json \
+            --run-url "$REVIEW_RUN_URL"
+
+  quality_gate:
+    name: AI review gate
+    needs: [review, publish_comment]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require completed review and comment
+        env:
+          REVIEW_RESULT: ${{ needs.review.result }}
+          COMMENT_RESULT: ${{ needs.publish_comment.result }}
+        run: |
+          if [ "$REVIEW_RESULT" != success ] || [ "$COMMENT_RESULT" != success ]; then
+            echo 'AI review gate: review or comment did not complete successfully.'
+            exit 1
+          fi
+      - name: Checkout trusted gate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ivanshchitov/ff.ai
+          ref: ${{ inputs.ffai_ref }}
+          path: ffai
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Download review
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ffai-pr-review-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: review-result
+      - name: Require no bugs or architecture problems
+        run: python ffai/scripts/check_review_gate.py review-result/report.json
