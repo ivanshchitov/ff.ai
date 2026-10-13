@@ -1,0 +1,3 @@
+{
+  "private_key": "-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+}
