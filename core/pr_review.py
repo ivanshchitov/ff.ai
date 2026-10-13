@@ -256,7 +256,7 @@ def _review_input(root, changes, corpus, snapshot, sources, limitations):
                 changed_content=content, sources=sources, limitations=limitations)
 
 
-def parse_review_findings(content: str, known_paths: set[str]):
+def parse_review_findings(content: str, known_lines: dict[str, int]):
     """Validate model data and derive both Markdown and the merge decision."""
     fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', content.strip(), re.S)
     try:
@@ -271,10 +271,11 @@ def parse_review_findings(content: str, known_paths: set[str]):
         for finding in data[name]:
             if (not isinstance(finding, dict)
                 or finding.get('severity') not in ('critical', 'high', 'medium', 'low')
-                or finding.get('path') not in known_paths
+                or not isinstance(finding.get('path'), str)
+                or finding['path'] not in known_lines
                 or type(finding.get('start_line')) is not int
                 or type(finding.get('end_line')) is not int
-                or not 1 <= finding['start_line'] <= finding['end_line']
+                or not 1 <= finding['start_line'] <= finding['end_line'] <= known_lines[finding['path']]
                 or any(not isinstance(finding.get(field), str) or not finding[field].strip()
                        for field in ('description', 'recommendation'))):
                 raise ReviewError('Непригодное замечание модели: путь, строки или содержание.')
@@ -368,7 +369,9 @@ def run_review(root: Path, base: str, head: str, domain, output: Path, client,
             if meta.finish_reason not in ('stop', None):
                 raise ReviewError('Ответ модели не завершён; ревью не выполнено полностью.')
             known_paths = {item.path for item in changes.files} | {s['path'] for s in sources}
-            findings, text, gate = parse_review_findings(meta.content, known_paths)
+            known_lines = {path: len((snapshot / path).read_text(encoding='utf-8').splitlines())
+                           for path in known_paths if (snapshot / path).is_file()}
+            findings, text, gate = parse_review_findings(meta.content, known_lines)
             report.update(findings=findings, gate=gate)
             if invariants.check_answer(text, domain.invariants):
                 raise ReviewError('Ответ модели нарушает правила домена.')

@@ -18,7 +18,7 @@ def test_findings_generate_review_and_gate(bugs, architecture, blocked):
     from core.pr_review import parse_review_findings
     data = {'potential_bugs': bugs, 'architectural_problems': architecture,
             'recommendations': ['Добавить тест.']}
-    findings, text, gate = parse_review_findings(json.dumps(data), {'transfer.cpp'})
+    findings, text, gate = parse_review_findings(json.dumps(data), {'transfer.cpp': 1})
     assert findings == data
     assert (gate['status'] == 'blocked') == blocked
     assert all(h in text for h in ('Потенциальные баги', 'Архитектурные проблемы', 'Рекомендации'))
@@ -32,11 +32,15 @@ def test_findings_generate_review_and_gate(bugs, architecture, blocked):
     json.dumps({'potential_bugs': [dict(FINDING, path='unknown.cpp')],
                 'architectural_problems': [], 'recommendations': []}),
     json.dumps({'potential_bugs': [dict(FINDING, start_line=0)],
+                'architectural_problems': [], 'recommendations': []}),
+    *[json.dumps({'potential_bugs': [dict(FINDING, path=path)],
+                 'architectural_problems': [], 'recommendations': []}) for path in ({}, [])],
+    json.dumps({'potential_bugs': [dict(FINDING, end_line=999999)],
                 'architectural_problems': [], 'recommendations': []})])
 def test_malformed_findings_are_not_treated_as_clean_review(content):
     from core.pr_review import ReviewError, parse_review_findings
     with pytest.raises(ReviewError):
-        parse_review_findings(content, {'transfer.cpp'})
+        parse_review_findings(content, {'transfer.cpp': 1})
 
 
 @pytest.mark.parametrize('bugs,architecture,status,exit_code', [
