@@ -1,0 +1,19 @@
+# Copy to WebDavClient/.github/workflows/ai-review.yml after publishing ff.ai v0.32.
+name: AI review with ff.ai
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: ivanshchitov/ff.ai/.github/workflows/pr-review.yml@v0.32
+    secrets:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}

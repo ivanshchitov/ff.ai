@@ -356,6 +356,14 @@ MCP `repo_git` собственного сервера с `status --short --bran
 Перед `/help` корпус сверяется с актуальными файлами; ручные изменения требуют пересборки.
 MCP-команды используют `GIT_OPTIONAL_LOCKS=0`, чтобы чтение status не обновляло git-index.
 Контракт: `project-help`; сценарий дня 31 — `docs/day31-project-help.md`.
+Неинтерактивное ревью PR: `ff-ai-review.py` → `core/pr_review.py`. Читает base/head
+и merge-base через git, использует снимок head вне проекта, раздельный baseline-RAG
+документации и кода и один запрос APIClient. Результаты `review.md`/`report.json`
+сохраняются в пустом каталоге вне проекта; история и память не участвуют.
+Ошибки API, пустые разделы, обрезанный ответ и лимиты имеют явный отказ; прежний
+результат не перезаписывается. Данные PR не исполняются. Reusable workflow —
+`.github/workflows/pr-review.yml`, caller — `examples/webdavclient-ai-review.yml`.
+Сценарий и настройка дня 32 — `docs/day32-pr-review.md`; контракт — `pr-review-pipeline`.
 Расписание: `/schedule` — снимок заданий и прогонов; задания выполняет `ff-ai-scheduler.py`
 (`--once` для одного прохода), а приложение объявляет о новых прогонах после ответа.
 Локальная модель: пресеты из `llama_server/models.ini`; автозапуск выключается `FFAI_LLAMA_AUTOSTART=0`

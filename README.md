@@ -197,3 +197,16 @@ Web принимает необязательный `request_id`: повтор �
 Демонстрации используют отдельные каталоги `FFAI_*` и временную копию проекта.
 Подготовка к дням 31–35 описана в
 [`плане реализации`](docs/superpowers/plans/2026-10-11-development-agent-preparation.md).
+
+AI-ревью PR запускается отдельно от TUI/web:
+
+```bash
+.venv/bin/python ff-ai-review.py --repo /path/to/aurora-project --domain aurora-qt5 \
+  --base main --head HEAD --output /path/to/review-results
+```
+
+Конвейер читает diff и файлы выбранного коммита, ищет контекст отдельно в коде и
+Markdown-документации и сохраняет `review.md` и `report.json` со стадиями, источниками
+и расходом модели. Каталог результатов — пустой и вне проекта. Рабочее дерево,
+git-index и история диалога сохраняются. Workflow для PR, настройка ключа и
+демонстрация на WebDavClient описаны в [инструкции дня 32](docs/day32-pr-review.md).
