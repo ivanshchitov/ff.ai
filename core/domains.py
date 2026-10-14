@@ -274,6 +274,25 @@ class DomainDocs:
 
 
 @dataclass(frozen=True)
+class DomainSupport:
+    data_path: str
+    tool: str
+
+
+def _load_support(path: Path) -> Optional[DomainSupport]:
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+    relative = _require(data, "data_path", path, str)
+    tool = _require(data, "tool", path, str)
+    if not relative.strip() or Path(relative).is_absolute() or any(p in ("", ".", "..") for p in relative.split("/")) or "\\" in relative:
+        raise DomainSchemaError(f"{path}: data_path должен быть относительным путём внутри проекта")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool):
+        raise DomainSchemaError(f"{path}: неверное имя tool")
+    return DomainSupport(relative, tool)
+
+
+@dataclass(frozen=True)
 class Domain:
     id: str
     title: str
@@ -301,6 +320,7 @@ class Domain:
     memory: Optional[DomainMemory] = None
     # Разделы профиля пользователя и вопрос об имени (P8).
     profile: Optional[DomainProfile] = None
+    support: Optional[DomainSupport] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -772,6 +792,7 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         ops=_load_ops(path / "ops.json"),
         memory=_load_memory(path / "memory.json"),
         profile=_load_profile(path / "profile.json"),
+        support=_load_support(path / "support.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")

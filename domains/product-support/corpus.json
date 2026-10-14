@@ -1,0 +1,53 @@
+{
+  "strategy": "structural",
+  "include_extensions": [
+    ".md"
+  ],
+  "exclude_globs": [
+    "build",
+    "build-*",
+    "build/*",
+    "build-*/*",
+    ".aurora",
+    ".aurora/*",
+    "vendor",
+    "vendor/*",
+    "*/.git",
+    ".git",
+    "*.lock",
+    "*.patch",
+    "*.diff",
+    "*.qm",
+    "*.ts",
+    "*.svg",
+    "*.png",
+    "*.jpg",
+    "*.ico",
+    "*.desktop",
+    ".env",
+    ".env.*",
+    "*.user",
+    "*.user.*",
+    ".idea",
+    ".vscode",
+    ".agents",
+    ".claude",
+    ".opencode",
+    ".omp",
+    "videos",
+    "logs",
+    "state",
+    ".ffai",
+    ".superpowers"
+  ],
+  "max_file_bytes": 262144,
+  "fixed": {
+    "chunk_lines": 60,
+    "overlap_lines": 10
+  },
+  "structural": {
+    "max_lines": 120,
+    "merge_below_lines": 12
+  },
+  "block_patterns": {}
+}

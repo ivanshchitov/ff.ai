@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "product-support",
+  "title": "Поддержка пользователей продукта",
+  "platform": "Документация продукта",
+  "markers": [
+    {
+      "glob": ".support-product"
+    }
+  ]
+}

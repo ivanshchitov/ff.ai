@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "default": true,
   "id": "aurora-qt5",
   "title": "Разработка приложений под ОС Аврора (Qt 5.6)",
   "platform": "Qt 5.6 / ОС Аврора",

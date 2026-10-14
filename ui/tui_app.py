@@ -156,14 +156,25 @@ class DevAssistantTUI:
         if command == "/branches":
             self._open_branches_screen()
             return
-        if command == "/help":
-            if not self._ensure_api_key():
+        if command in ("/help", "/support"):
+            if command == "/help" and not self._ensure_api_key():
                 return
             try:
                 result = self._ask_with_spinner(line, command=True)
             except APIError as error:
-                self.console.print(f"[bold red]Ошибка запроса: {escape(str(error))}[/bold red]")
-                return
+                # Support validates syntax/domain/ticket before it needs model credentials.
+                if (command == "/support" and not config.is_local_model(self.session.model)
+                        and not is_valid_api_key(config.get_api_key())):
+                    if not self._ensure_api_key():
+                        return
+                    try:
+                        result = self._ask_with_spinner(line, command=True)
+                    except APIError as retry_error:
+                        self.console.print(f"[bold red]Ошибка запроса: {escape(str(retry_error))}[/bold red]")
+                        return
+                else:
+                    self.console.print(f"[bold red]Ошибка запроса: {escape(str(error))}[/bold red]")
+                    return
             if result.answer is not None:
                 self._render_answer(result.answer)
                 return

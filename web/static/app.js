@@ -407,7 +407,7 @@ async function ask(question) {
 
 async function runCommand(line) {
   if (state.busy) return;
-  const help = line.trim().split(/\s+/)[0] === "/help";
+  const help = ["/help", "/support"].includes(line.trim().split(/\s+/)[0]);
   if (help) {
     state.busy = true;
     el("send").disabled = true;

@@ -300,6 +300,34 @@ class RepoAgent:
         self.history.add(question, meta.content, usage=self._usage_block(meta))
         return meta
 
+    def ask_isolated(self, question: str, request_context: str, retrieval_query: str,
+                     on_phase=None) -> AnswerMeta:
+        """Single grounded request without session history, memory, profile or actions."""
+        previous = self.config.code_enabled, self.config.code_retrieval
+        self.config.code_enabled, self.config.code_retrieval = True, code_retrieval.MODE_BASELINE
+        self._docs_fragments = ()
+        self._last_docs_report = self._last_citations = None
+        self._last_tool_flow = self._last_compression = self._last_facts = self._last_schedule = None
+        self._tool_steps = self._last_routing = ()
+        try:
+            self._retrieve_code(retrieval_query, on_phase)
+            messages = [{"role": "system", "content": prompts.build_system_message(self.domain, self.config.format)},
+                        {"role": "system", "content": request_context}]
+            for message in (self._invariants_message(), self._code_message()):
+                if message is not None:
+                    messages.append(message)
+            if not self._code_fragments:
+                messages.append({"role": "system", "content": "Документация недоступна или фрагментов нет. Назови ограничение; не давай рекомендации о продукте без источников."})
+            if self._citations_enabled():
+                messages.append({"role": "system", "content": citations.citations_message()})
+            messages.append({"role": "user", "content": prompts.build_user_prompt(question, self.config.settings)})
+            self._signal(on_phase, RequestPhase.REQUEST)
+            meta = self._ask_question(messages)
+            meta = self._enforce_invariants(messages, meta, on_phase)
+            return self._enforce_citations(messages, meta, on_phase)
+        finally:
+            self.config.code_enabled, self.config.code_retrieval = previous
+
     # --- документация портала и проверка ссылок -------------------------------------------
 
     def _retrieve_docs(self, question: str, on_phase=None) -> None:

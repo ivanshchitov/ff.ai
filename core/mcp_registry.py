@@ -134,6 +134,14 @@ def repo_server_spec(root: Path, tools_path: Optional[Path] = None) -> MCPServer
     return spec
 
 
+def support_server_spec(root: Path, support: Any) -> MCPServerSpec:
+    script = Path(__file__).resolve().parent.parent / "mcp_server" / "support_server.py"
+    return MCPServerSpec(name="support", command=sys.executable,
+                         args=(str(script), "--root", str(root), "--data", support.data_path),
+                         description="Выбранный тикет и пользователь, только чтение",
+                         health_tool="support_health", source="инструмент")
+
+
 def _override_from_environment() -> Optional[Tuple[MCPServerSpec, ...]]:
     """Тестовое и демонстрационное переопределение реестра: один сервер вместо всего реестра.
 
@@ -187,6 +195,9 @@ def registry(domain: Any = None, root: Optional[Path] = None) -> Tuple[MCPServer
     if override is not None:
         return override
     specs = list(getattr(domain, "servers", ()) or ())
+    support = getattr(domain, "support", None)
+    if support is not None and root is not None:
+        specs.append(support_server_spec(Path(root), support))
     if root is not None:
         tools_path = getattr(domain, "tools_path", None)
         specs.append(repo_server_spec(Path(root), tools_path))

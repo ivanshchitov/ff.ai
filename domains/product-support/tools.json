@@ -1,0 +1,14 @@
+{
+  "run": {
+    "allowed": []
+  },
+  "git": {
+    "allowed": [
+      "status",
+      "log",
+      "show",
+      "diff",
+      "ls-files"
+    ]
+  }
+}
