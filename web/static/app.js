@@ -21,7 +21,8 @@ const PHASE_LABELS = {
   code_rerank: "Отбор фрагментов кода…",
   tool_choice: "Выбор инструментов…",
   task_plan: "Планирование задачи…",
-  task_execute: "Выполнение подзадачи…",
+  task_execute: "Субагент разработчик: подготовка патча…",
+  task_review: "Субагент ревьюер: независимая проверка…",
   task_validate: "Проверка артефакта…",
 };
 
@@ -455,6 +456,7 @@ function taskDetails(task) {
   for (const item of task.plan || []) {
     if (item.change_id) lines.push("Изменение " + item.change_id + (item.rolled_back ? ": отменено" : item.applied ? ": применено" : ": не применено"));
     if (item.reason) lines.push(item.reason);
+    lines.push(...(item.review_notes || []));
   }
   for (const change of task.changes || []) {
     lines.push(change.id + " · " + change.status + (change.reason ? ": " + change.reason : ""));

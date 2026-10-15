@@ -51,7 +51,7 @@ class FakeAsk:
         self.calls.append((phase, messages, max_words))
         if phase in self.fail_phases:
             raise APIError("модель недоступна")
-        content = self.answers.pop(0) if self.answers else ""
+        content = REVIEW_OK if phase == "task_review" else (self.answers.pop(0) if self.answers else "")
         return AnswerMeta(
             content=content,
             model="test",
@@ -317,15 +317,14 @@ def test_forbidden_construction_in_the_artifact_is_caught(repo: Path, tmp_path: 
         "+#include <QtWidgets/QApplication>\n```"
     )
     ask = FakeAsk(PLAN, bad, bad, REVIEW_OK)
-    # Лояльная подготовка: патч применяется мимо проверок выполнения — так проверяется именно этап.
-    pipeline = _pipeline(
-        repo,
-        tmp_path,
-        ask,
-        prepare=lambda index, text: _apply_without_checks(repo, index, text),
-        build=lambda command: (True, "ок"),
-    )
-    _approved(pipeline)
+    # Seed a previously applied unsafe artifact: execution now rejects it before prepare.
+    pipeline = _pipeline(repo, tmp_path, FakeAsk(REVIEW_OK), build=lambda command: (True, "ок"))
+    pipeline.add("добавить экран")
+    pipeline._save(task_state.begin_task(pipeline.state))
+    pipeline._save(task_state.plan_built(pipeline.state, ("новый экран",)))
+    pipeline.answer_edits("")
+    seeded = _apply_without_checks(repo, 1, task_pipeline.parse_patch_response(bad))
+    pipeline._save(task_state.record_patch(pipeline.state, seeded))
     _to_validation(pipeline)
 
     report = pipeline.step()
@@ -439,3 +438,180 @@ def test_validation_ignores_unrelated_user_work_and_sees_check_results(repo, tmp
     assert 'unrelated.cpp' not in text
     assert 'третья строка' in text
     assert pipeline.state.current.status == task_state.TASK_STATUS_DONE
+
+
+def test_subagents_review_before_confirmation_with_isolated_context(repo, tmp_path):
+    calls, approvals = [], []
+    patch = task_pipeline.parse_patch_response(PATCH)
+    def ask(messages, words, phase):
+        calls.append((phase, messages))
+        if phase == 'task_plan':
+            content = '{"items":["update notes"]}'
+        elif phase == 'task_execute':
+            content = 'PRIVATE_BUILDER_REASONING\n' + patch
+        else:
+            assert phase == 'task_review'
+            assert (repo / 'notes.txt').read_text() == 'первая строка\nвторая строка\n'
+            assert not approvals
+            context = '\n'.join(m['content'] for m in messages)
+            assert 'PRIVATE_BUILDER_REASONING' not in context
+            assert patch.strip() in context
+            assert 'первая строка' in context
+            content = '{"issues":[]}'
+        return AnswerMeta(content, 'test', .01, 10, 10, 20, 0)
+    pipeline = _pipeline(repo, tmp_path, ask)
+    pipeline._confirm = lambda *_: approvals.append('confirmed') or True
+    _approved(pipeline)
+    report = pipeline.step()
+    assert [phase for phase, _ in calls] == ['task_plan', 'task_execute', 'task_review']
+    assert approvals == ['confirmed']
+    assert pipeline.state.current.patches[0].applied
+    assert any('ревьюер' in note.lower() for note in report.notes)
+
+
+@pytest.mark.parametrize('response,finish', [('not json','stop'), ('{}','stop'),
+    ('{"issues":[]}', 'length'), ('{"issues":"none"}','stop')])
+def test_unavailable_or_invalid_subagent_review_blocks_write(repo, tmp_path, response, finish):
+    approvals=[]
+    class Ask(FakeAsk):
+        def __call__(self, messages, words, phase):
+            if phase == 'task_review':
+                return AnswerMeta(response, 'test', .01, 1, 1, 2, 0, finish)
+            return super().__call__(messages, words, phase)
+    pipeline = _pipeline(repo, tmp_path, Ask(PLAN, PATCH))
+    pipeline._confirm=lambda *_: approvals.append(True) or True
+    _approved(pipeline)
+    pipeline.step()
+    assert not pipeline.state.current.patches[0].applied
+    assert not approvals
+    assert 'третья строка' not in (repo / 'notes.txt').read_text()
+
+
+def test_subagents_correct_once_and_keep_final_rejection(repo, tmp_path):
+    phases, corrections = [], []
+    class Ask(FakeAsk):
+        def __call__(self, messages, words, phase):
+            phases.append(phase)
+            if phase == 'task_review':
+                return AnswerMeta('{"issues":["MISSING_CHECK"]}', 'test', .01, 1, 1, 2, 0)
+            if phase == 'task_execute' and phases.count(phase) == 2:
+                corrections.extend(m['content'] for m in messages)
+            return super().__call__(messages, words, phase)
+    pipeline=_pipeline(repo, tmp_path, Ask(PLAN, PATCH, PATCH))
+    _approved(pipeline)
+    pipeline.step()
+    assert phases.count('task_execute') == 2 and phases.count('task_review') == 2
+    assert 'MISSING_CHECK' in '\n'.join(corrections)
+    assert not pipeline.state.current.patches[0].applied
+    assert 'MISSING_CHECK' in pipeline.state.current.patches[0].reason
+
+
+def test_deterministic_rejection_precedes_subagent_review(repo, tmp_path):
+    ask=FakeAsk(PLAN, '--- a/absent.txt\n+++ b/absent.txt\n@@ -1 +1 @@\n-no\n+yes\n')
+    pipeline=_pipeline(repo,tmp_path,ask)
+    _approved(pipeline)
+    pipeline.step()
+    assert not pipeline.state.current.patches[0].applied
+    assert 'task_review' not in [phase for phase, *_ in ask.calls]
+
+
+def test_review_api_failure_is_recorded_without_confirmation(repo, tmp_path):
+    ask=FakeAsk(PLAN, PATCH, fail_phases=('task_review',))
+    pipeline=_pipeline(repo,tmp_path,ask)
+    _approved(pipeline)
+    pipeline.step()
+    assert not pipeline.state.current.patches[0].applied
+    assert 'ревьюер' in pipeline.state.current.patches[0].reason
+
+
+def test_subagent_successful_correction_and_audit_survive_restart(repo, tmp_path):
+    reviews=[]
+    class Ask(FakeAsk):
+        def __call__(self, messages, words, phase):
+            if phase == 'task_review':
+                reviews.append(messages)
+                content = '{"issues":["explain change"]}' if len(reviews)==1 else REVIEW_OK
+                return AnswerMeta(content,'test',.01,3,2,5,0)
+            return super().__call__(messages,words,phase)
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,PATCH,PATCH))
+    _approved(pipeline)
+    pipeline.step()
+    stored=pipeline.store.load().current.patches[0]
+    assert stored.applied
+    assert any('explain change' in line for line in stored.review_notes)
+    assert any('Ревьюер' in line and '5' in line for line in stored.review_notes)
+
+
+def test_single_item_plan_limit_has_consistent_request(repo, tmp_path):
+    pipeline=_pipeline(repo,tmp_path,FakeAsk())
+    task=task_state.TaskItem(1,'atomic code and docs change',plan_limit=1)
+    assert 'от 1 до 1' in pipeline._plan_request(task,pipeline.state)
+
+
+def test_correction_api_failure_keeps_rejection_audit_and_pauses(repo,tmp_path):
+    phases=[]
+    class Ask(FakeAsk):
+        def __call__(self,messages,words,phase):
+            phases.append(phase)
+            if phase=='task_review':
+                return AnswerMeta('{"issues":["FIX_REQUIRED"]}','test',.01,3,2,5,0)
+            if phase=='task_execute' and phases.count(phase)==2:
+                raise APIError('unavailable')
+            return super().__call__(messages,words,phase)
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,PATCH))
+    _approved(pipeline)
+    pipeline.step()
+    task=pipeline.store.load().current
+    assert not task.patches[0].applied
+    assert any('FIX_REQUIRED' in note for note in task.patches[0].review_notes)
+    assert pipeline.paused
+    assert pipeline.step() is None
+
+
+def test_empty_truncated_developer_does_not_repeat_without_user(repo,tmp_path):
+    ask=FakeAsk(PLAN,'',truncated=True)
+    pipeline=_pipeline(repo,tmp_path,ask)
+    _approved(pipeline)
+    pipeline.step()
+    assert pipeline.paused
+    assert pipeline.step() is None
+    assert pipeline.store.load().current.patches[0].reason==task_pipeline.EXECUTE_FAILED_TRUNCATED
+
+
+def test_review_json_substring_cannot_authorize_write(repo,tmp_path):
+    class Ask(FakeAsk):
+        def __call__(self,messages,words,phase):
+            if phase=='task_review':
+                return AnswerMeta('{"issues":[]} review unavailable','test',.01,1,1,2,0)
+            return super().__call__(messages,words,phase)
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,PATCH))
+    _approved(pipeline)
+    pipeline.step()
+    assert pipeline.paused and not pipeline.state.current.patches[0].applied
+
+
+def test_interrupted_correction_is_durable_without_transient_pause(repo,tmp_path):
+    pipeline=None
+    class Ask(FakeAsk):
+        executions=0
+        def __call__(self,messages,words,phase):
+            if phase=='task_review':
+                return AnswerMeta('{"issues":["FIX"]}','test',.01,1,1,2,0)
+            if phase=='task_execute':
+                self.executions+=1
+                if self.executions==2:
+                    snapshot=pipeline.store.load()
+                    assert snapshot.current.patches[0].review_pending
+                    assert not snapshot.paused
+                    raise KeyboardInterrupt()
+            return super().__call__(messages,words,phase)
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,PATCH))
+    _approved(pipeline)
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.step()
+    restarted=_pipeline(repo,tmp_path,FakeAsk())
+    assert restarted.paused
+    restarted.set_paused(False)
+    assert restarted.step().notes
+    assert restarted.paused
+    assert 'третья строка' not in (repo/'notes.txt').read_text()

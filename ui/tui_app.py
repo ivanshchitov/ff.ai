@@ -53,7 +53,8 @@ PHASE_LABELS = {
     RequestPhase.CODE_RERANK: "Отбор фрагментов кода...",
     RequestPhase.TOOL_CHOICE: "Выбор инструментов...",
     RequestPhase.TASK_PLAN: "Планирование задачи...",
-    RequestPhase.TASK_EXECUTE: "Выполнение подзадачи...",
+    RequestPhase.TASK_EXECUTE: "Субагент разработчик: подготовка патча...",
+    RequestPhase.TASK_REVIEW: "Субагент ревьюер: независимая проверка...",
     RequestPhase.TASK_VALIDATE: "Проверка артефакта...",
 }
 FORMAT_LABELS = {
@@ -471,7 +472,14 @@ class DevAssistantTUI:
                         if key == "pause":
                             paused = True
                             break
-                        report = self.session.task_step()
+                        def phase_listener(event):
+                            if isinstance(event, PhaseChanged):
+                                live.update(self._task_frame(PHASE_LABELS.get(event.phase, event.phase.value)))
+                        unsubscribe = self.session.subscribe(phase_listener)
+                        try:
+                            report = self.session.task_step()
+                        finally:
+                            unsubscribe()
                         if report is None:
                             break
                         for text in report.notes:

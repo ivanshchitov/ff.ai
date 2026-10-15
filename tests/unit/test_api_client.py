@@ -364,3 +364,11 @@ def test_empty_content_with_length_finish_reason_is_still_a_meta(client):
     assert meta.content == ""
     assert meta.finish_reason == "length"
     assert meta.completion_tokens == 4050
+
+
+def test_null_content_preserves_truncation_and_usage():
+    data={'choices':[{'message':{'content':None},'finish_reason':'length'}],
+          'usage':{'prompt_tokens':100,'completion_tokens':500,'total_tokens':600}}
+    meta=APIClient._meta_from(data,.5,'test')
+    assert meta.content=='' and meta.finish_reason=='length'
+    assert meta.total_tokens==600

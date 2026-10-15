@@ -90,6 +90,8 @@ class TaskPatch:
     reason: str = ""
     change_id: str = ""
     rolled_back: bool = False
+    review_notes: Tuple[str, ...] = ()
+    review_pending: bool = False
 
     @property
     def recorded(self) -> bool:
@@ -645,6 +647,8 @@ def result_markdown(task: TaskItem) -> str:
             lines.append(f"Патч не применён: {reason}")
         else:
             lines.append("Работа не выполнена.")
+        if patch:
+            lines.extend(patch.review_notes)
         lines.append("")
     if task.issues:
         lines.append("## Неустранённые замечания")
@@ -738,6 +742,8 @@ def _task_to_dict(task: TaskItem) -> Dict[str, object]:
                 "reason": patch.reason,
                 "change_id": patch.change_id,
                 "rolled_back": patch.rolled_back,
+                "review_notes": list(patch.review_notes),
+                "review_pending": patch.review_pending,
             }
             for patch in task.patches
         ],
@@ -791,6 +797,8 @@ def _task_from_dict(raw: Dict[str, object]) -> TaskItem:
                     reason=str(entry.get("reason", "")),
                     change_id=str(entry.get("change_id", "")),
                     rolled_back=bool(entry.get("rolled_back", False)),
+                    review_notes=tuple(str(line) for line in entry.get("review_notes", []) or []),
+                    review_pending=bool(entry.get("review_pending", False)),
                 )
             )
     issues = []

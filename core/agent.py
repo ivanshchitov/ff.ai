@@ -55,6 +55,7 @@ class RequestPhase(Enum):
     TOOL_CHOICE = "tool_choice"
     TASK_PLAN = "task_plan"
     TASK_EXECUTE = "task_execute"
+    TASK_REVIEW = "task_review"
     TASK_VALIDATE = "task_validate"
     REQUEST_ROUTING = "request_routing"
 

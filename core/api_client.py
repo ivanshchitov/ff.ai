@@ -160,7 +160,7 @@ class APIClient:
             temperature,
             model,
         )
-        return data["choices"][0]["message"]["content"].strip()
+        return (data["choices"][0]["message"]["content"] or "").strip()
 
     def ask_with_usage(
         self,
@@ -194,7 +194,7 @@ class APIClient:
 
     @staticmethod
     def _meta_from(data: Dict[str, Any], elapsed: float, model: str) -> AnswerMeta:
-        content = data["choices"][0]["message"]["content"].strip()
+        content = (data["choices"][0]["message"]["content"] or "").strip()
         finish_reason = data["choices"][0].get("finish_reason")
         request_usage = data.get("usage") or {}
         prompt_tokens = request_usage.get("prompt_tokens", 0)

@@ -66,6 +66,8 @@ def _model_double(stub, *, second_patch: str = SCREEN_PATCH, review: str = REVIE
 
     def builder(payload):
         text = "\n".join(message["content"] for message in payload["messages"])
+        if payload["messages"][0]["content"].startswith("Ты независимо проверяешь"):
+            return reply(REVIEW_OK)
         if "Число подзадач" in text:
             return reply(PLAN)
         if "Выполни подзадачу" in text:
@@ -155,6 +157,9 @@ def _phases(stub) -> list:
     phases = []
     for request in stub.requests:
         text = "\n".join(message["content"] for message in request["payload"]["messages"])
+        if request["payload"]["messages"][0]["content"].startswith("Ты независимо проверяешь"):
+            phases.append("review")
+            continue
         if "Число подзадач" in text:
             phases.append("plan")
         elif "Выполни подзадачу" in text:
@@ -191,7 +196,7 @@ def test_full_run_applies_patches_and_writes_the_report(app_with_task):
     repo = app.repo
     assert (repo / "notes.txt").read_text(encoding="utf-8").endswith("третья строка\n")
     assert (repo / "src" / "screen.qml").is_file()
-    assert _phases(stub) == ["plan", "execute", "execute", "validate"]
+    assert _phases(stub) == ["plan", "execute", "review", "execute", "review", "validate"]
 
     tasks_dir = tmp_path / "state" / "tasks"
     reports = list(tasks_dir.glob("*.md"))

@@ -126,6 +126,7 @@ def task_snapshot(session: AssistantSession) -> Dict[str, Any]:
                     "patch": patch.text if patch is not None else "",
                     "change_id": patch.change_id if patch is not None else "",
                     "rolled_back": bool(patch is not None and patch.rolled_back),
+                    "review_notes": list(patch.review_notes) if patch is not None else [],
                 }
             )
         tasks.append(

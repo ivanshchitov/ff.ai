@@ -1386,6 +1386,8 @@ class AssistantSession:
                 if patch is not None and patch.change_id:
                     note += f" (изменение {patch.change_id})"
                 lines.append(f"    [{mark}] {index}. {item}{note}")
+                if patch:
+                    lines.extend("        " + line for line in patch.review_notes)
             if task.issues:
                 lines.append("Замечания:")
                 lines.extend(f"    {issue.line()}" for issue in task.issues)

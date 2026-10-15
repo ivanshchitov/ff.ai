@@ -37,6 +37,7 @@ class DevelopmentModel:
                 {'tool':'repo_search', 'arguments':{'query':'READY_MARKER'}},
                 {'tool':'repo_read', 'arguments':{'path':'source.cpp'}},
                 {'tool':'repo_read', 'arguments':{'path':'README.md'}},
+                {'tool':'repo_read', 'arguments':{'path':'readiness.h'}},
             ]})
         elif last.startswith('Ты планируешь'):
             content = '{"items":["Enable the readiness flag and document it"]}'
@@ -44,7 +45,10 @@ class DevelopmentModel:
             evidence = '\n'.join(m['content'] for m in messages[:-1])
             assert 'bool READY_MARKER() { return false; }' in evidence
             assert 'READY_MARKER is disabled.' in evidence
+            assert 'READINESS_CONTRACT' in evidence
             content = PATCH
+        elif first.startswith('Ты независимо проверяешь'):
+            content = '{"issues":[]}'
         elif last.startswith('Ты проверяешь'):
             evidence = '\n'.join(m['content'] for m in messages[:-1])
             assert 'bool READY_MARKER() { return true; }' in evidence
@@ -63,6 +67,7 @@ def development_project(tmp_path, monkeypatch):
     subprocess.run(['git','init','-q',str(root)], check=True)
     (root / 'source.cpp').write_text('bool READY_MARKER() { return false; }\n')
     (root / 'README.md').write_text('READY_MARKER is disabled.\n')
+    (root / 'readiness.h').write_text('// READINESS_CONTRACT: report current readiness\n')
     # A staged file belonging to the user must survive the complete agent cycle.
     (root / 'manual.txt').write_text('user work\n')
     subprocess.run(['git','-C',str(root),'add','manual.txt'], check=True)
