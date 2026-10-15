@@ -47,7 +47,7 @@ class DevelopmentModel:
             assert 'READY_MARKER is disabled.' in evidence
             assert 'READINESS_CONTRACT' in evidence
             content = PATCH
-        elif first.startswith('Ты независимо проверяешь'):
+        elif any(m['role']=='system' and m['content'].startswith('Ты независимо проверяешь') for m in messages):
             content = '{"issues":[]}'
         elif last.startswith('Ты проверяешь'):
             evidence = '\n'.join(m['content'] for m in messages[:-1])

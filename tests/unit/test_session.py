@@ -3,6 +3,8 @@
 import threading
 import time
 import os
+import json
+import responses
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,33 @@ def _session(repo: Path, **kwargs) -> AssistantSession:
     # получать сообщений о поиске, которых тест не ждёт.
     kwargs.setdefault("code_retriever", None)
     return AssistantSession(root=repo, **kwargs)
+
+
+@pytest.mark.parametrize('model,phase,custom_url,structured',[
+    ('glm-5.3-flash','task_review',False,True),
+    ('glm-5.3-flash','task_execute',False,False),
+    ('deepseek-v4.1-flash','task_review',False,False),
+    ('glm-5.3-flash','task_review',True,False),
+])
+@responses.activate
+def test_task_review_schema_only_for_verified_provider(repo,monkeypatch,model,phase,custom_url,structured):
+    from core.api_client import APIClient
+    endpoint='https://custom.invalid/v1/chat/completions' if custom_url else config.DEFAULT_API_URL
+    monkeypatch.setattr(config,'API_URL',endpoint)
+    responses.add(responses.POST,endpoint,json={'choices':[{'message':{'content':'{"issues":[]}'},
+                                                       'finish_reason':'stop'}]},status=200)
+    session=_session(repo,client=APIClient('sk-test'))
+    session.model=model
+    session._task_ask([{'role':'user','content':'review'}],100,phase)
+    payload=json.loads(responses.calls[0].request.body)
+    if structured:
+        format=payload['response_format']
+        assert format['type']=='json_schema' and format['json_schema']['strict'] is True
+        schema=format['json_schema']['schema']
+        assert schema['required']==['issues'] and schema['additionalProperties'] is False
+        assert schema['properties']['issues']['maxItems']==10
+    else:
+        assert 'response_format' not in payload
 
 
 def test_ask_returns_answer_and_records_history(repo: Path):

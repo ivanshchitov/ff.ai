@@ -66,7 +66,7 @@ def _model_double(stub, *, second_patch: str = SCREEN_PATCH, review: str = REVIE
 
     def builder(payload):
         text = "\n".join(message["content"] for message in payload["messages"])
-        if payload["messages"][0]["content"].startswith("Ты независимо проверяешь"):
+        if any(m['role']=='system' and m['content'].startswith('Ты независимо проверяешь') for m in payload['messages']):
             return reply(REVIEW_OK)
         if "Число подзадач" in text:
             return reply(PLAN)
@@ -157,7 +157,7 @@ def _phases(stub) -> list:
     phases = []
     for request in stub.requests:
         text = "\n".join(message["content"] for message in request["payload"]["messages"])
-        if request["payload"]["messages"][0]["content"].startswith("Ты независимо проверяешь"):
+        if any(m['role']=='system' and m['content'].startswith('Ты независимо проверяешь') for m in request['payload']['messages']):
             phases.append("review")
             continue
         if "Число подзадач" in text:

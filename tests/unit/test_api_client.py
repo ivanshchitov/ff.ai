@@ -390,3 +390,13 @@ def test_invalid_reasoning_effort_refuses_before_network(client,monkeypatch):
     monkeypatch.setenv('FFAI_REASONING_EFFORT','invalid')
     with pytest.raises(APIError,match='FFAI_REASONING_EFFORT'):
         client.ask('system','user',model='glm-5.3-flash')
+
+
+@responses.activate
+def test_response_format_is_forwarded_only_when_requested(client):
+    responses.add(responses.POST,config.API_URL,json=_completion('{"issues":[]}'),status=200)
+    format={'type':'json_schema','json_schema':{'name':'review','schema':{'type':'object'}}}
+    client.ask_with_usage_messages([{'role':'user','content':'review'}],response_format=format)
+    assert json.loads(responses.calls[0].request.body)['response_format']==format
+    client.ask_with_usage_messages([{'role':'user','content':'hello'}])
+    assert 'response_format' not in json.loads(responses.calls[1].request.body)

@@ -74,6 +74,7 @@ class APIClient:
         max_tokens: int,
         temperature: Optional[float],
         model: str,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> tuple[Dict[str, Any], float]:
         """Единый HTTP-путь: messages — готовый список ролей; None-температура = дефолт."""
         local = model in config.LOCAL_MODELS
@@ -94,6 +95,8 @@ class APIClient:
             "temperature": temperature if temperature is not None else config.TEMPERATURE,
             "max_tokens": max_tokens,
         }
+        if response_format is not None:
+            payload['response_format'] = response_format
         effort = os.getenv('FFAI_REASONING_EFFORT', '').strip()
         if effort and effort not in ('low', 'high', 'max'):
             raise APIError('FFAI_REASONING_EFFORT: допустимы low, high, max или пустое значение.')
@@ -193,9 +196,10 @@ class APIClient:
         max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
         temperature: Optional[float] = None,
         model: str = config.DEFAULT_MODEL,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> AnswerMeta:
         """Полный список сообщений (стек агента); None-температура — клиентский дефолт."""
-        data, elapsed = self._request(messages, max_tokens, temperature, model)
+        data, elapsed = self._request(messages, max_tokens, temperature, model, response_format)
         return self._meta_from(data, elapsed, model)
 
     @staticmethod

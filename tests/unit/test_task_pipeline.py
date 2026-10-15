@@ -489,6 +489,39 @@ def test_unavailable_or_invalid_subagent_review_blocks_write(repo, tmp_path, res
     assert 'третья строка' not in (repo / 'notes.txt').read_text()
 
 
+@pytest.mark.parametrize('response,finish,classification',[
+    ('```json\n{"issues":[]}\n```','stop','JSON'),
+    ('{"issues":[],"approved":true}','stop','schema'),
+    ('{"issues":[]}','length','finish_reason'),
+    ('','stop','empty'),
+])
+def test_failed_review_keeps_safe_bounded_diagnostic(repo,tmp_path,monkeypatch,response,finish,classification):
+    secret='test-credential-do-not-log-34987'
+    monkeypatch.setenv('OPENCODE_API_KEY',secret)
+    # Invalid review output is data, never instructions for a correction or approval.
+    if classification=='JSON':
+        response+='\nBearer abcdefgh12345678\n'+secret+'\n'+'x'*5000
+    class Ask(FakeAsk):
+        def __call__(self,messages,words,phase):
+            if phase=='task_review':
+                return AnswerMeta(response,'test',.01,1,1,2,0,finish)
+            return super().__call__(messages,words,phase)
+    approvals=[]
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,PATCH))
+    pipeline._confirm=lambda *_: approvals.append(True) or True
+    _approved(pipeline);pipeline.step()
+    stored=TaskStore(pipeline.store.path).load().current.patches[-1]
+    assert not approvals and not stored.applied
+    diagnostics=[line for line in stored.review_notes if line.startswith('Ревьюер: диагностика ')]
+    assert len(diagnostics)==1
+    data=json.loads(diagnostics[0].removeprefix('Ревьюер: диагностика '))
+    assert classification in data['error']
+    assert data['finish_reason']==finish and data['chars']==len(response)
+    assert len(data['response'])<=2000
+    assert secret not in diagnostics[0] and 'abcdefgh12345678' not in diagnostics[0]
+    assert '\n' not in diagnostics[0]
+
+
 def test_subagents_correct_once_and_keep_final_rejection(repo, tmp_path):
     phases, corrections = [], []
     class Ask(FakeAsk):

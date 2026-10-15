@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -363,9 +364,9 @@ class TaskPipeline:
             role_notes.append(f'Разработчик: версия {attempt + 1}; проверки патча пройдены.')
             # Fresh role context: never send the builder's answer or conversation to its reviewer.
             review_messages = [
-                {"role": "system", "content": asset_text('task_review_prompt.md')},
                 {"role": "system", "content": task_state.task_instruction(self.domain)},
                 *self.last_context.messages,
+                {"role": "system", "content": asset_text('task_review_prompt.md')},
                 {"role": "user", "content": 'Цель задачи: ' + task.goal +
                  '\nПодзадача: ' + task.plan[index - 1] +
                  '\nДетерминированные проверки применения и правил: пройдены.\n'
@@ -378,15 +379,22 @@ class TaskPipeline:
                 role_notes.append(self._role_usage('Ревьюер', review))
             if review is None or review.finish_reason not in (None, 'stop'):
                 reason = 'ревьюер недоступен или ответ обрезан'
+                role_notes.append(self._review_diagnostic(review, 'finish_reason' if review else 'API unavailable'))
                 break
+            invalid = ''
             try:
                 data = json.loads(review.content)
-            except (ValueError, TypeError):
+            except json.JSONDecodeError as error:
+                invalid = f'JSON: {error.msg}; line={error.lineno}, column={error.colno}, pos={error.pos}'
                 data = None
-            if (not isinstance(data, dict) or not isinstance(data.get('issues'), list)
-                    or any(not isinstance(item, str) or not item.strip() for item in data['issues'])
+            except TypeError:
+                invalid = 'JSON: non-string response'
+                data = None
+            if (not isinstance(data, dict) or set(data) != {'issues'} or not isinstance(data.get('issues'), list)
+                    or any(not isinstance(item, str) or not item.strip() or len(item)>2000 for item in data['issues'])
                     or len(data['issues']) > 10):
                 reason = 'ревьюер вернул некорректный ответ'
+                role_notes.append(self._review_diagnostic(review, 'empty' if not review.content else invalid or 'schema: expected only issues, up to 10 nonempty strings of 2000 chars'))
                 break
             issues = data['issues']
             if not issues:
@@ -574,6 +582,20 @@ class TaskPipeline:
             result = domain_checks.check_patch(patch_text, self.root, domain_checks.without_build(checks))
             return "; ".join(issue.line() for issue in result.issues)
         return patches.check(self.root, patch_text)
+
+    @staticmethod
+    def _review_diagnostic(meta: Optional[AnswerMeta], error: str) -> str:
+        """Persist a bounded, escaped failure sample without known credentials."""
+        from .pr_review import redact
+        content = meta.content if meta else ''
+        clean = redact(content)
+        for key,value in os.environ.items():
+            if len(value)>=8 and any(word in key.upper() for word in ('KEY','TOKEN','SECRET','PASSWORD','CREDENTIAL')):
+                clean = clean.replace(value, '[REDACTED]')
+        return 'Ревьюер: диагностика ' + json.dumps({
+            'error': error, 'finish_reason': meta.finish_reason if meta else None,
+            'chars': len(content), 'response': clean[:2000],
+        }, ensure_ascii=False)
 
     def _request(
         self,

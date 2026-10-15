@@ -1157,11 +1157,22 @@ class AssistantSession:
             self._emit(PhaseChanged(RequestPhase(phase)))
         except ValueError:
             pass
+        options = {}
+        # This model/endpoint pair passed a live schema-enforcement probe.
+        # Unknown providers retain the existing request; API errors never fall back silently.
+        if (phase == 'task_review' and self._agent.model == 'glm-5.3-flash'
+                and config.api_url_for_model(self._agent.model) == config.DEFAULT_API_URL):
+            options['response_format'] = {
+                'type': 'json_schema',
+                'json_schema': {'name': 'task_review', 'strict': True,
+                                'schema': json.loads((config.ASSETS_DIR / 'task_review_schema.json').read_text())},
+            }
         meta = client.ask_with_usage_messages(
             messages,
             max_tokens=config.max_tokens_for_words(max_words),
             temperature=None,
             model=self._agent.model,
+            **options,
         )
         self._agent.record_usage(meta)
         return meta
