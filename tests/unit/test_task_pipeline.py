@@ -259,7 +259,9 @@ def test_validation_without_issues_finishes_and_writes_the_report(repo: Path, tm
 
 
 def test_validation_returns_to_execution_on_issues(repo: Path, tmp_path: Path):
-    ask = FakeAsk(PLAN, PATCH, PATCH, REVIEW_ISSUE)
+    # Explicitly invalid context: a repeated short insertion is a valid minimal diff.
+    invalid = PATCH.replace(" вторая строка", " отсутствующий контекст")
+    ask = FakeAsk(PLAN, PATCH, invalid, REVIEW_ISSUE)
     pipeline = _pipeline(repo, tmp_path, ask, build=lambda command: (True, "собрано"))
     _approved(pipeline)
     _to_validation(pipeline)
@@ -615,3 +617,62 @@ def test_interrupted_correction_is_durable_without_transient_pause(repo,tmp_path
     assert restarted.step().notes
     assert restarted.paused
     assert 'третья строка' not in (repo/'notes.txt').read_text()
+
+
+def test_model_diff_recounts_hunks_without_changing_content(repo):
+    from core import patches
+    raw = ("diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n"
+           "@@ -1,99 +1,99 @@\n первая строка\n вторая строка\n+третья строка\n"
+           "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n"
+           "@@ -0,0 +1,99 @@\n+--- a/decoy.txt\n++++ b/decoy.txt\n")
+    result = task_pipeline.parse_patch_response(raw)
+    parsed = patches.parse(result)
+    assert parsed.paths == ('notes.txt', 'new.txt')
+    assert '@@ -1,2 +1,3 @@' in result
+    assert '@@ -0,0 +1,2 @@' in result
+    subprocess.run(['git','apply','--check','-'],cwd=repo,input=result,text=True,check=True)
+    subprocess.run(['git','apply','-'],cwd=repo,input=result,text=True,check=True)
+    assert (repo/'notes.txt').read_text() == 'первая строка\nвторая строка\nтретья строка\n'
+    assert (repo/'new.txt').read_text() == '--- a/decoy.txt\n+++ b/decoy.txt\n'
+    assert not (repo/'decoy.txt').exists()
+
+
+def test_model_diff_recount_preserves_invalid_content_and_unframed_diff():
+    from core import patches
+    malformed = ('diff --git a/n b/n\n--- a/n\n+++ b/n\n'
+                 '@@ -1,3 +1,3 @@\n context\nmissing prefix\n')
+    with pytest.raises(patches.PatchError):
+        patches.parse(task_pipeline.parse_patch_response(malformed))
+    unframed = '--- a/n\n+++ b/n\n@@ -1,99 +1,99 @@\n context\n'
+    assert task_pipeline.parse_patch_response(unframed) == unframed
+
+
+def test_model_diff_recount_preserves_payload_cr_and_unicode_separator():
+    text = ('diff --git a/n b/n\n--- a/n\n+++ b/n\n'
+            '@@ -1,99 +1,99 @@\n context\n+payload\r\n+one\u2028two\n')
+    result = task_pipeline.parse_patch_response(text)
+    assert '+payload\r\n+one\u2028two\n' in result
+    assert result == text.replace('@@ -1,99 +1,99 @@', '@@ -1,1 +1,3 @@')
+
+
+def test_model_diff_fence_preserves_trailing_cr_payload():
+    body = ('diff --git a/n b/n\n--- a/n\n+++ b/n\n'
+            '@@ -1,99 +1,99 @@\n context\n+payload\r\n')
+    result = task_pipeline.parse_patch_response('```diff\n' + body + '```')
+    assert result == body.replace('@@ -1,99 +1,99 @@', '@@ -1,1 +1,2 @@')
+
+
+def test_model_diff_fence_keeps_markdown_fences_inside_hunk():
+    body = ('diff --git a/readme.md b/readme.md\n--- a/readme.md\n+++ b/readme.md\n'
+            '@@ -1,99 +1,99 @@\n-old\n+new\n ```\n context\n+after fence\n'
+            'diff --git a/n b/n\n--- a/n\n+++ b/n\n'
+            '@@ -1,99 +1,99 @@\n-old\n+new\n')
+    expected = body.replace('@@ -1,99 +1,99 @@', '@@ -1,3 +1,4 @@', 1)
+    expected = expected.replace('@@ -1,99 +1,99 @@', '@@ -1,1 +1,1 @@')
+    assert task_pipeline.parse_patch_response('```diff\n' + body + '```') == expected
+
+
+def test_small_goal_can_have_one_step_with_three_step_ceiling(repo,tmp_path):
+    pipeline=_pipeline(repo,tmp_path,FakeAsk())
+    task=task_state.TaskItem(1,'создать короткий документ',plan_limit=3)
+    assert 'от 1 до 3' in pipeline._plan_request(task,pipeline.state)

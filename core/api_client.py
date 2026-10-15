@@ -1,6 +1,7 @@
 """Клиент для обращения к Chat Completions API."""
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -93,6 +94,11 @@ class APIClient:
             "temperature": temperature if temperature is not None else config.TEMPERATURE,
             "max_tokens": max_tokens,
         }
+        effort = os.getenv('FFAI_REASONING_EFFORT', '').strip()
+        if effort and effort not in ('low', 'high', 'max'):
+            raise APIError('FFAI_REASONING_EFFORT: допустимы low, high, max или пустое значение.')
+        if effort:
+            payload['reasoning_effort'] = effort
         headers = {"Content-Type": "application/json"}
         if not local:
             headers["Authorization"] = f"Bearer {self.api_key}"

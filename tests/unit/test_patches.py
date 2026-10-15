@@ -112,3 +112,14 @@ def test_new_file_patch_applies_inside_the_repository(tmp_path: Path):
     root = _repo(tmp_path)
     assert patches.apply(root, NEW_FILE) == ""
     assert (root / "src" / "models.cpp").is_file()
+
+
+def test_minimal_hunk_can_insert_before_unmentioned_tail(tmp_path):
+    root = _repo(tmp_path)
+    (root/'notes.txt').write_text('первая строка\nвторая строка\nсохранённый хвост\n')
+    patch = '--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,3 @@\n первая строка\n вторая строка\n+вставка\n'
+    assert patches.check(root,patch) == ''
+    patches.apply(root,patch)
+    assert (root/'notes.txt').read_text() == 'первая строка\nвторая строка\nвставка\nсохранённый хвост\n'
+    wrong = patch.replace(' первая строка',' чужой контекст')
+    assert patches.check(root,wrong)

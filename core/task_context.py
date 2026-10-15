@@ -30,6 +30,7 @@ class TaskContextProvider:
 
     def collect(self, stage, goal, step=None, changes=()) -> TaskContext:
         notes, names, evidence = [], [], []
+        explicit = []
         ranges = {}
         question = goal + ('\n' + str(step) if step else '')
         stale = self.stale()
@@ -39,6 +40,7 @@ class TaskContextProvider:
         files = code_index.scan(self.root, corpus).files if corpus else ()
         available = [p.relative_to(self.root).as_posix() for p in files if not p.is_symlink()]
         if stage != 'validation':
+            explicit = sorted((p for p in available if p in question), key=question.index)
             if self.retrieve and not stale:
                 try:
                     report = self.retrieve(question)
@@ -95,7 +97,9 @@ class TaskContextProvider:
                         first = int(match[1])
                         ranges.setdefault(current, []).append((max(1, first - 10), first + int(match[2] or 1) + 10))
         conventions = [p for p in available if Path(p).name.lower() in ('readme.md', 'agents.md', 'contributing.md')]
-        names = list(dict.fromkeys(changed + conventions + names))
+        names = list(dict.fromkeys(changed + explicit + conventions + names))
+        for name in explicit:
+            ranges.pop(name, None)
         fingerprints, selected = {}, []
         budget = config.TOOL_FLOW_CONTEXT_CHARS
         evidence_budget = min(sum(len(content) for content in evidence), budget // 2)

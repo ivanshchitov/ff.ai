@@ -287,7 +287,7 @@ def _reason(completed: subprocess.CompletedProcess) -> str:
 def check(root: Path, patch_text: str) -> str:
     """Проверка чистоты применения: пустая строка означает «патч ложится на файлы»."""
     try:
-        completed = _git(root, ["apply", "--check", "--whitespace=nowarn", "-"], patch_text)
+        completed = _git(root, ["apply", "--check", "--unidiff-zero", "--whitespace=nowarn", "-"], patch_text)
     except (OSError, subprocess.SubprocessError) as error:
         return f"проверка применения не выполнена: {error}"
     if completed.returncode != 0:
@@ -298,7 +298,7 @@ def check(root: Path, patch_text: str) -> str:
 def apply(root: Path, patch_text: str) -> str:
     """Применение патча: пустая строка означает успех, иначе — причина отказа."""
     try:
-        completed = _git(root, ["apply", "--whitespace=nowarn", "-"], patch_text)
+        completed = _git(root, ["apply", "--unidiff-zero", "--whitespace=nowarn", "-"], patch_text)
     except (OSError, subprocess.SubprocessError) as error:
         return f"применение не выполнено: {error}"
     if completed.returncode != 0:

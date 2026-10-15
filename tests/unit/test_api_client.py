@@ -372,3 +372,21 @@ def test_null_content_preserves_truncation_and_usage():
     meta=APIClient._meta_from(data,.5,'test')
     assert meta.content=='' and meta.finish_reason=='length'
     assert meta.total_tokens==600
+
+
+@responses.activate
+def test_reasoning_effort_is_explicit_and_opt_in(client,monkeypatch):
+    monkeypatch.setenv('FFAI_REASONING_EFFORT','low')
+    responses.add(responses.POST,config.API_URL,json=_completion('ok'),status=200)
+    client.ask('system','user',model='glm-5.3-flash')
+    assert json.loads(responses.calls[0].request.body)['reasoning_effort']=='low'
+    monkeypatch.delenv('FFAI_REASONING_EFFORT')
+    client.ask('system','user',model='glm-5.3-flash')
+    assert 'reasoning_effort' not in json.loads(responses.calls[1].request.body)
+
+
+@responses.activate
+def test_invalid_reasoning_effort_refuses_before_network(client,monkeypatch):
+    monkeypatch.setenv('FFAI_REASONING_EFFORT','invalid')
+    with pytest.raises(APIError,match='FFAI_REASONING_EFFORT'):
+        client.ask('system','user',model='glm-5.3-flash')

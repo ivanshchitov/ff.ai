@@ -105,3 +105,17 @@ def test_prior_patch_does_not_consume_fresh_tool_evidence_budget(tmp_path, monke
     context = TaskContextProvider(tmp_path, DOMAIN, read_flow=flow).collect('execution', 'update project', changes=(change,))
     text = '\n'.join(m['content'] for m in context.messages)
     assert 'MCP_REQUIRED_CONSTRAINT' in text
+
+
+def test_explicit_plan_path_has_priority_and_full_current_text(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from core import config
+    monkeypatch.setattr(config,'CODE_CANDIDATES_BEFORE',1)
+    (tmp_path/'noise.cpp').write_text('topic topic')
+    (tmp_path/'target.md').write_text('first\nsecond\nTAIL_MARKER\n')
+    retrieve = lambda _: SimpleNamespace(fragments=(SimpleNamespace(identifier='noise.cpp'),))
+    flow = lambda _: (SimpleNamespace(arguments={'path':'target.md','start_line':1,'end_line':1},text='first'),)
+    context=TaskContextProvider(tmp_path,DOMAIN,retrieve=retrieve,read_flow=flow).collect(
+        'execution','topic',step='update target.md')
+    assert context.paths == ('target.md',)
+    assert 'TAIL_MARKER' in '\n'.join(m['content'] for m in context.messages)
