@@ -128,6 +128,21 @@ def _chain(*steps) -> str:
 TOOLS = {"repo": ("repo_search", "repo_read", "repo_save"), "docs": ("docs_search",)}
 
 
+@pytest.mark.parametrize('temperature',[0.0,0.2])
+def test_tool_choice_rounds_use_session_temperature(tmp_path,temperature):
+    temperatures=[]
+    class Client(FakeClient):
+        def ask_with_usage_messages(self,messages,**kwargs):
+            if messages[0]['content'].startswith('Выбери инструменты'):
+                temperatures.append(kwargs['temperature'])
+            return super().ask_with_usage_messages(messages,**kwargs)
+    choices=[json.dumps({'steps':[_step(1,'repo_search',{'query':'source'})],'more':True}),'{"tool":null}']
+    agent=_agent(tmp_path,Client(choices=choices),FakeHub(TOOLS))
+    agent.settings=agent.settings.with_temperature(temperature)
+    agent.ask('Найди исходник')
+    assert temperatures==[temperature,temperature]
+
+
 # --- один раунд -----------------------------------------------------------------------------
 
 

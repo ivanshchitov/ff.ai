@@ -116,6 +116,16 @@ def test_task_review_schema_only_for_verified_provider(repo,monkeypatch,model,ph
         assert 'response_format' not in payload
 
 
+@pytest.mark.parametrize('phase',['task_plan','task_execute','task_review','task_validate'])
+@pytest.mark.parametrize('temperature',[0.0,0.2])
+def test_task_requests_use_current_temperature(repo,phase,temperature):
+    client=FakeClient()
+    session=_session(repo,client=client)
+    session.settings=session.settings.with_temperature(temperature)
+    session._task_ask([{'role':'user','content':'task'}],100,phase)
+    assert client.calls[0]['temperature']==temperature
+
+
 def test_ask_returns_answer_and_records_history(repo: Path):
     client = FakeClient(answer="Инициализация в src/models.cpp.")
     session = _session(repo, client=client)

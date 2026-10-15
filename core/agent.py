@@ -413,7 +413,7 @@ class RepoAgent:
                 meta = self.client.ask_with_usage_messages(
                     messages,
                     max_tokens=config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS),
-                    temperature=None,
+                    temperature=self.config.temperature,
                     model=self.config.model,
                 )
             except APIError as error:

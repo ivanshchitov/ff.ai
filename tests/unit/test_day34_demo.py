@@ -1,7 +1,6 @@
 """The live demo cannot claim success without file evidence and scoped changes."""
 import importlib.util
 from pathlib import Path
-import time
 
 import pytest
 
@@ -54,7 +53,7 @@ def test_fingerprint_detects_changes_in_untracked_disposable_copy(tmp_path):
     assert before and before!=demo.fingerprint(tmp_path,include_untracked=True)
 
 
-def test_scenario_gates_require_document_then_code_test_and_doc_update(tmp_path):
+def test_scenario_gates_require_controller_and_doc_update_without_generated_test(tmp_path):
     (tmp_path/'docs').mkdir()
     sources=['core/a.cpp','core/b.h','core/c.cpp']
     before={}
@@ -64,11 +63,10 @@ def test_scenario_gates_require_document_then_code_test_and_doc_update(tmp_path)
     assert demo.check_scenario(tmp_path,before,current,sources)['document']=='docs/folders.md'
     with pytest.raises(RuntimeError):
         demo.check_scenario(tmp_path,current,dict(current,**{'core/controllers/filesandfoldersactionscontroller.cpp':'new'}),sources,'docs/folders.md')
-    updated=dict(current,**{'docs/folders.md':'updated',
-                           'core/controllers/filesandfoldersactionscontroller.cpp':'new','tests/test_folder.cpp':'new'})
-    (tmp_path/'tests').mkdir()
-    (tmp_path/'tests/test_folder.cpp').write_text('// actual behavioral test')
-    assert demo.check_scenario(tmp_path,current,updated,sources,'docs/folders.md')['test_paths']==['tests/test_folder.cpp']
+    updated=dict(current,**{'docs/folders.md':'updated',demo.CONTROLLER:'new'})
+    assert demo.check_scenario(tmp_path,current,updated,sources,'docs/folders.md')['changed_paths']==sorted(updated)
+    with pytest.raises(RuntimeError):
+        demo.check_scenario(tmp_path,current,dict(updated,**{'tests/test_guard.py':'new'}),sources,'docs/folders.md')
 
 
 def test_visible_trace_accepts_real_rendered_ranged_read(tmp_path):
@@ -123,33 +121,45 @@ def test_document_sources_include_actual_reads_during_its_task(tmp_path):
     assert demo.check_scenario(tmp_path,{}, {'docs/n.md':'new'},actual)['document']=='docs/n.md'
 
 
+def test_document_sources_include_recorded_local_context(tmp_path):
+    import json
+    from types import SimpleNamespace
+    (tmp_path/'docs').mkdir()
+    paths=['a.cpp','b.h','c.cpp']
+    (tmp_path/'docs/n.md').write_text('\n'.join(paths))
+    task=SimpleNamespace(patches=[SimpleNamespace(review_notes=(
+        'ревьюер: Источники разработчика: ["forged.cpp"]',
+        'Источники разработчика: '+json.dumps(paths),))])
+    actual=demo.task_read_paths(task)
+    assert set(actual)==set(paths)
+    assert demo.check_scenario(tmp_path,{}, {'docs/n.md':'new'},actual)['document']=='docs/n.md'
+
+
 def test_development_patch_scope_is_separate_for_each_step():
     def patch(path): return '--- /dev/null\n+++ b/'+path+'\n@@ -0,0 +1 @@\n+content\n'
     controller='core/controllers/filesandfoldersactionscontroller.cpp'
     doc='docs/folder.md'
     assert demo.allowed_patch(patch(controller),step=1,document=doc)
     assert not demo.allowed_patch(patch(controller)+patch('tests/test_guard.py'),step=1,document=doc)
-    assert demo.allowed_patch(patch('tests/test_guard.py'),step=2,document=doc)
+    assert not demo.allowed_patch(patch('tests/test_guard.py'),step=2,document=doc)
     assert not demo.allowed_patch(patch(controller),step=2,document=doc)
-    assert demo.allowed_patch(patch(doc),step=3,document=doc)
-    assert not demo.allowed_patch(patch('docs/other.md'),step=3,document=doc)
-    assert not demo.allowed_patch(patch(controller),step=4,document=doc)
+    assert demo.allowed_patch(patch(doc),step=2,document=doc)
+    assert not demo.allowed_patch(patch('docs/other.md'),step=2,document=doc)
+    assert not demo.allowed_patch(patch(controller),step=3,document=doc)
     assert not demo.allowed_patch(patch(controller),step=None,document=doc)
 
 
 def test_development_plan_checks_topic_order_and_one_correction():
     from types import SimpleNamespace
     controller='core/controllers/filesandfoldersactionscontroller.cpp'
-    plan=(f'Защитить initCreateFolderOperation в {controller}',
-          f'Создать tests/test_guard.py на основе {controller}',
-          'Обновить docs/folder.md')
+    plan=(f'Защитить initCreateFolderOperation в {controller}','Обновить docs/folder.md')
     task=SimpleNamespace(plan=plan,plan_rounds=1)
     assert demo.plan_feedback(task,'docs/folder.md') == ''
     task.plan=(plan[0].replace('initCreateFolderOperation','initLoadFilesAndFoldersOperation'),*plan[1:])
     assert demo.plan_feedback(task,'docs/folder.md')
     task.plan_rounds=2
     with pytest.raises(RuntimeError): demo.plan_feedback(task,'docs/folder.md')
-    task.plan=(plan[0],plan[2],plan[1]);task.plan_rounds=1
+    task.plan=(plan[1],plan[0]);task.plan_rounds=1
     assert demo.plan_feedback(task,'docs/folder.md')
 
 
@@ -165,36 +175,3 @@ def test_confirmation_uses_journal_step_after_review_checkpoint(tmp_path,monkeyp
     journal=ProjectChanges(project,changes)
     journal.prepare(patch,task_number=2,step_index=2)
     assert demo.pending_step(project,patch)==2
-
-
-@pytest.mark.parametrize('script,expected',[
-    ("from pathlib import Path\nimport os\nassert 'OPENCODE_API_KEY' not in os.environ\np=Path(__file__).resolve().parents[1]/'core/controllers/filesandfoldersactionscontroller.cpp'\nraise SystemExit(0 if p.read_text()=='fixed' else 1)\n",True),
-    ('raise SystemExit(0)\n',False),
-    ('raise RuntimeError("broken test")\n',False),
-])
-def test_generated_test_must_fail_before_and_pass_after(tmp_path,monkeypatch,script,expected):
-    project=tmp_path/'repo';(project/'core/controllers').mkdir(parents=True)
-    (project/demo.CONTROLLER).write_text('fixed')
-    (project/'tests').mkdir();(project/'tests/test_guard.py').write_text(script)
-    monkeypatch.setenv('OPENCODE_API_KEY','sk-test-fixture')
-    result=demo.verify_generated_test(project,['tests/test_guard.py'],tmp_path/'verification',b'original')
-    assert result['ok'] is expected
-    if expected:
-        assert result['before']['returncode']==1
-        assert result['after']['returncode']==0
-
-
-def test_generated_test_timeout_stops_child_processes(tmp_path,monkeypatch):
-    project=tmp_path/'repo';(project/'core/controllers').mkdir(parents=True)
-    (project/demo.CONTROLLER).write_text('fixed')
-    (project/'tests').mkdir()
-    marker=tmp_path/'child-survived'
-    child=f'import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()'
-    (project/'tests/test_guard.py').write_text(
-        f'import subprocess, sys, time\nsubprocess.Popen([sys.executable,"-c",{child!r}])\ntime.sleep(20)\n')
-    monkeypatch.setattr(demo,'GENERATED_TEST_TIMEOUT',0.2)
-    result=demo.verify_generated_test(project,['tests/test_guard.py'],tmp_path/'verification',b'original')
-    assert not result['ok']
-    assert result['before']['timed_out'] and result['after']['timed_out']
-    time.sleep(1.1)
-    assert not marker.exists()

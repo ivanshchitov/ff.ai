@@ -22,25 +22,21 @@ import time
 FFAI = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(FFAI))
 CONTROLLER = 'core/controllers/filesandfoldersactionscontroller.cpp'
-GENERATED_TEST_TIMEOUT = 45
 INVESTIGATE = ('Найди реализацию CreateFolderOperation и её вызов из контроллера создания папки. '
+               'Пути не угадывай: сначала получи их поиском, затем прочитай найденные файлы. '
                'Ничего не меняй. Прочитай реализацию, объявление и вызывающий код. '
                'Назови связи и источники с путями и строками. Ответ краткий.')
-DOCUMENT = ('Создай в docs один краткий Markdown-документ до 50 строк о создании папки: '
-            'путь от контроллера до сетевой операции, результат и обработка ошибок. '
+DOCUMENT = ('Создай в docs один краткий Markdown-документ о создании папки через CreateFolderOperation: '
+            'путь от initCreateFolderOperation вызывающего контроллера до сетевой операции, '
+            'результат и обработка ошибок. '
             'Сам найди исходники, дай ссылки минимум на три прочитанных файла. '
-            'Изменения ограничь документацией. Достаточно одной подзадачи.')
-DEVELOP = ('Защити создание папки от повторного запуска в initCreateFolderOperation: '
-           'при существующем connectionInProgress() вернись без создания новой операции. '
-           'Сохрани существующий сброс состояния после успеха/ошибки. '
-           'План — ровно три последовательные подзадачи. '
-           '1. Только ранний выход в реализации контроллера. '
-           '2. Только один автономный Python-тест в tests/: извлеки реальные тела initCreateFolderOperation '
-           'и handleCreatingFolderOperation, скомпилируй с заглушками Qt/сети; проверь двойной вызов '
-           'и новый запуск после успеха и ошибки. '
-           '3. Только дополни созданный документ {document} описанием защиты и команды запуска теста. '
-           'В первых двух пунктах плана укажи найденный исходник контроллера. '
-           'У каждой подзадачи отдельный патч. Настройки сборки прежние.')
+            'Изменения ограничь ровно одним новым файлом в docs; содержимое существующих файлов сохраняется. '
+            'Достаточно одной подзадачи.')
+DEVELOP = ('Защити initCreateFolderOperation от повторного запуска: при connectionInProgress() вернись. '
+           'Сохрани сброс после успеха/ошибки. Ровно 2 подзадачи: '
+           '1) только контроллер, укажи его путь в плане; '
+           '2) только дополни {document} описанием защиты. '
+           'Проверку выполнит внешняя C++-проба; тесты и сборку не менять. Каждый патч отдельно.')
 
 
 def git(root, *args):
@@ -110,14 +106,11 @@ def allowed_patch(patch, document_only=False, *, step=None, document=None):
         if step == 1:
             return names == (CONTROLLER,)
         if step == 2:
-            return len(names)==1 and names[0].startswith('tests/') and names[0].endswith('.py')
-        if step == 3:
             return names == (document,)
         return False
     return bool(names) and all(
         (name.startswith('docs/') and name.endswith('.md')) or
-        (not document_only and (name == 'core/controllers/filesandfoldersactionscontroller.cpp'
-                              or name.startswith('tests/')))
+        (not document_only and name == CONTROLLER)
         for name in names)
 
 
@@ -126,17 +119,17 @@ def plan_feedback(task, document=None):
     """Approve a bounded plan or allow one clarification before any writes."""
     plan=task.plan
     valid=(len(plan)==1 if document is None else
-           len(plan)==3 and CONTROLLER in plan[0] and 'initCreateFolderOperation' in plan[0]
-           and CONTROLLER in plan[1] and 'tests/' in plan[1] and document in plan[2])
+           len(plan)==2 and CONTROLLER in plan[0] and 'initCreateFolderOperation' in plan[0]
+           and document in plan[1])
     if valid:
         return ''
     if task.plan_rounds>=2:
         raise RuntimeError('План повторно не соответствует цели; запись не подтверждена')
     if document is None:
         return 'Одна подзадача: создать один краткий Markdown-документ в docs.'
-    return ('Ровно три подзадачи по цели создания папки: 1) initCreateFolderOperation в найденном '
-            'исходнике контроллера; 2) один Python-тест в tests/, укажи исходник для извлечения методов; '
-            '3) обновление '+document+'. Пункты 1 и 2 должны содержать путь исходника контроллера.')
+    return ('Ровно две подзадачи по цели создания папки: 1) initCreateFolderOperation в найденном '
+            'исходнике контроллера, укажи путь; 2) обновление '+document+'. '
+            'Тесты не создавать: проверка поведения выполняется готовой внешней C++-пробой.')
 
 
 def pending_step(project, patch):
@@ -146,6 +139,17 @@ def pending_step(project, patch):
         if entry.status=='prepared' and entry.patch==patch:
             return entry.step_index
     return None
+
+
+def task_read_paths(task):
+    """Actual local files supplied by the application, not model-declared citations."""
+    from core.task_pipeline import CONTEXT_PATHS_PREFIX
+    paths=set()
+    for patch in task.patches:
+        for note in patch.review_notes:
+            if note.startswith(CONTEXT_PATHS_PREFIX):
+                paths.update(json.loads(note[len(CONTEXT_PATHS_PREFIX):]))
+    return paths
 
 
 def verify_behavior(source, output):
@@ -231,42 +235,6 @@ int main() {
             'scope':'actual method bodies with Qt/operation doubles; not full application build'}
 
 
-def verify_generated_test(project, test_paths, output, original_controller):
-    """Run the produced regression test against original and changed method bodies."""
-    from core.patches import safe_path
-    from core.pr_review import redact
-    if len(test_paths)!=1 or not test_paths[0].startswith('tests/') or not test_paths[0].endswith('.py'):
-        raise RuntimeError('Нужен ровно один автономный Python-тест')
-    name=test_paths[0]
-    test=safe_path(project,name)
-    if not test.is_file() or test.is_symlink() or output.resolve().is_relative_to(project.resolve()):
-        raise RuntimeError('Недопустимый путь проверки')
-    baseline=output/'baseline'
-    shutil.copytree(project,baseline,ignore=shutil.ignore_patterns('.git','build*','__pycache__'),symlinks=True)
-    safe_path(baseline,CONTROLLER).write_bytes(original_controller)
-    environment={key:value for key,value in os.environ.items()
-                 if not any(marker in key.upper() for marker in ('KEY','TOKEN','SECRET','PASSWORD','CREDENTIAL'))}
-    results={}
-    for label,root in (('before',baseline),('after',project)):
-        command=[sys.executable,name]
-        run=subprocess.Popen(command,cwd=root,env=environment,stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE,text=True,start_new_session=True)
-        try:
-            stdout,stderr=run.communicate(timeout=GENERATED_TEST_TIMEOUT)
-            results[label]={'returncode':run.returncode,'output':redact(stdout+stderr)[:6000],
-                            'timed_out':False}
-        except subprocess.TimeoutExpired:
-            results[label]={'returncode':None,'output':'Test timeout','timed_out':True}
-        finally:
-            try:
-                os.killpg(run.pid,signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            run.communicate(timeout=5)
-    return {**results,'ok':not any(item['timed_out'] for item in results.values())
-            and results['before']['returncode']!=0 and results['after']['returncode']==0}
-
-
 def read_paths_from_screen(screen,project):
     paths=set(re.findall(r'\.repo_read\s*\([^)]*?\bpath=["\']?([^,\s)"\']+)',screen.replace('\n','')))
     return sorted(path for path in paths if (project/path).is_file())
@@ -280,24 +248,20 @@ def check_scenario(project,before,after,read_paths,document=None):
             raise RuntimeError('Цель документации должна создать ровно один Markdown-файл')
         document=created[0]
     else:
-        tests=sorted(name for name in changed if name.startswith('tests/') and name in after)
-        if (document not in changed or not tests or
-                'core/controllers/filesandfoldersactionscontroller.cpp' not in changed):
-            raise RuntimeError('Нужны правка контроллера, обновление документа и файл проверки')
-        if any(not (project/name).read_text().strip() for name in tests):
-            raise RuntimeError('Файл проверки пуст')
+        if changed != {document,CONTROLLER}:
+            raise RuntimeError('Нужны только правка контроллера и обновление документа')
     content=(project/document).read_text()
     cited={path for path in read_paths if path in content or Path(path).name in content}
     if len(cited)<3:
         raise RuntimeError('Документ не ссылается на три прочитанных исходника')
-    return {'document':document,'changed_paths':sorted(changed),
-            'test_paths':sorted(name for name in changed if name.startswith('tests/'))}
+    return {'document':document,'changed_paths':sorted(changed)}
 
 
 def run_facade(project, result, approve):
     from core.session import AssistantSession, PhaseChanged
     from core.pr_review import redact
     session=AssistantSession(project,domain_id='aurora-qt5')
+    session.settings=session.settings.with_temperature(0)
     session.model=os.environ['DAY34_DEMO_MODEL']
     def event(item):
         if isinstance(item,PhaseChanged):
@@ -365,6 +329,7 @@ def run_facade(project, result, approve):
         if task.status!='done' or not task.applied_patches() or session.task_paused or task.issues:
             raise RuntimeError('Задача не завершилась проверенным патчем: '+task.title)
         read_paths.update(read_paths_from_screen('\n'.join(session.tool_flow_lines()),project))
+        read_paths.update(task_read_paths(task))
         result['tasks'][-1]['read_paths']=sorted(read_paths)
         acceptance=check_scenario(project,scenario_before,fingerprint(project,include_untracked=True),
                                   read_paths,document)
@@ -388,6 +353,22 @@ def run_visible(project,result,approve):
                     domain='aurora-qt5',api_key=None,mcp_command=os.environ['FFAI_MCP_COMMAND'],
                     mcp_args=os.environ['FFAI_MCP_ARGS'],auto_tools=True,cols=size.columns,
                     rows=size.lines,extra_env=dict(os.environ),mirror=mirror) as app:
+        def wait_input():
+            deadline=time.monotonic()+20
+            while not app.screen_text().rstrip().endswith('Вы:'):
+                if time.monotonic()>deadline:
+                    raise TimeoutError('Нет приглашения TUI перед командой')
+                time.sleep(.05)
+        def command(text,expected):
+            wait_input()
+            count=app.scrollback().count(expected)
+            app.send_line(text)
+            deadline=time.monotonic()+40
+            while app.scrollback().count(expected)<=count:
+                if time.monotonic()>deadline:
+                    raise TimeoutError('Нет нового результата команды '+text)
+                time.sleep(.05)
+            wait_input()
         from core import config
         model=os.environ['DAY34_DEMO_MODEL']
         app.send_line('/models');app.wait_for('↑/↓',timeout=20)
@@ -395,13 +376,29 @@ def run_visible(project,result,approve):
         for _ in range(config.model_choices().index(model)):
             app.send_key(b'\x1b[B')
         app.send_key(b'\r');time.sleep(.5)
-        app.send_line('/rag-code index');app.wait_for('Файлов:',timeout=40)
-        for command in ('/rag-code retrieval baseline','/rag-docs mode off','/rag-code mode off'):
-            app.send_line(command);time.sleep(.5)
+        app.send_line('/settings');app.wait_for('Температура',timeout=20)
+        time.sleep(.4)
+        from ui import settings_screen
+        for _ in range(settings_screen.ROW_TEMPERATURE):
+            app.send_key(b'\x1b[B')
+            app.read_for(.1)
+        for _ in range(len(f'{config.TEMPERATURE:.1f}')):
+            app.send_key(b'\x7f')
+            app.read_for(.1)
+        app.send_key(b'0');app.read_for(.2)
+        app.send_key(b'\x1b')
+        settings_deadline=time.monotonic()+20
+        while not app.screen_text().rstrip().endswith('Вы:'):
+            if time.monotonic()>settings_deadline:
+                raise TimeoutError('Экран настроек не вернулся к вводу команды')
+            time.sleep(.05)
+        command('/rag-code index','Файлов:')
+        command('/rag-code retrieval baseline','Режим отбора:')
+        command('/rag-docs mode off','Поиск по документации выключен.')
+        command('/rag-code mode off','Поиск по корпусу кода выключен.')
         before=fingerprint(project,include_untracked=True)
         app.ask(INVESTIGATE,timeout=180)
-        app.send_line('/tool flow')
-        app.wait_for('Раундов:',timeout=20)
+        command('/tool flow','Раундов:')
         screen=app.scrollback()
         paths=read_paths_from_screen(screen,project)
         from core.history_manager import HistoryManager
@@ -410,14 +407,14 @@ def run_visible(project,result,approve):
         result['investigation']={'answer':answer,'read_paths':paths,'flow_screen':screen}
         if len(paths)<3 or not answer or answer.startswith('Не знаю') or before!=fingerprint(project,include_untracked=True):
             raise RuntimeError('Исследование TUI не прошло проверку источников и сохранности файлов')
-        time.sleep(5)
-        app.send_line('/rag-code mode on');time.sleep(.5)
+        app.read_for(5)
+        command('/rag-code mode on','Поиск по корпусу кода включён.')
         plans=confirmations=0
         document=None
         for number,goal in enumerate((DOCUMENT,DEVELOP),1):
             if number==2:
                 goal=goal.format(document=document)
-                app.send_line('/tool auto off');time.sleep(.4)
+                command('/tool auto off','Автовызов инструментов выключен.')
             scenario_before=fingerprint(project,include_untracked=True)
             app.send_line('/task add '+goal)
             add_deadline=time.monotonic()+20
@@ -467,22 +464,18 @@ def run_visible(project,result,approve):
             else:
                 raise TimeoutError('Истекло время ожидания задачи')
             if number==1:
-                time.sleep(.4)
-                flow_count=app.scrollback().count('Раундов:')
-                app.send_line('/tool flow')
-                flow_deadline=time.monotonic()+20
-                while app.scrollback().count('Раундов:')<=flow_count:
-                    if time.monotonic()>flow_deadline:
-                        raise TimeoutError('Нет нового отчёта чтения файлов')
-                    app.screen_text();time.sleep(.05)
+                command('/tool flow','Раундов:')
                 paths=sorted(set(paths)|set(read_paths_from_screen(app.scrollback(),project)))
+            paths=sorted(set(paths)|task_read_paths(task))
             result['tasks'][-1]['read_paths']=paths
             acceptance=check_scenario(project,scenario_before,fingerprint(project,include_untracked=True),paths,document)
             document=acceptance['document']
             result['tasks'][-1]['acceptance']=acceptance
-            time.sleep(5)
-        for command in ('/task','/changes','/usage'):
-            app.send_line(command);time.sleep(4)
+            wait_input()
+            app.read_for(5)
+        for text,expected in (('/task','Очередь: задач'),('/changes','— applied; задача'),
+                              ('/usage','Сессия: запросов')):
+            command(text,expected);app.read_for(4)
         app.send_line('/exit');app.wait_exit()
         result['screen']=app.scrollback()
 
@@ -526,15 +519,9 @@ def main():
     try:
         project=prepare(source,workspace)
         controller=project/'core/controllers/filesandfoldersactionscontroller.cpp'
-        original_controller=controller.read_bytes()
         result['behavior_before']=verify_behavior(controller,workspace/'probe-before')
         print('Проверка до изменений: '+json.dumps(result['behavior_before'],ensure_ascii=False),flush=True)
         (run_visible if args.visible else run_facade)(project,result,args.approve_demo)
-        result['generated_test']=verify_generated_test(project,result['tasks'][-1]['acceptance']['test_paths'],
-                                                       workspace/'generated-test',original_controller)
-        print(json.dumps(result['generated_test'],ensure_ascii=False),flush=True)
-        if not result['generated_test']['ok']:
-            raise RuntimeError('Созданный тест должен падать до правки и проходить после неё')
         result['behavior_after']=verify_behavior(controller,workspace/'probe-after')
         print(json.dumps(result['behavior_after'],ensure_ascii=False),flush=True)
         if not result['behavior_after']['ok']:

@@ -259,10 +259,12 @@ def test_validation_without_issues_finishes_and_writes_the_report(repo: Path, tm
 
 
 def test_validation_returns_to_execution_on_issues(repo: Path, tmp_path: Path):
-    # Explicitly invalid context: a repeated short insertion is a valid minimal diff.
-    invalid = PATCH.replace(" вторая строка", " отсутствующий контекст")
-    ask = FakeAsk(PLAN, PATCH, invalid, REVIEW_ISSUE)
-    pipeline = _pipeline(repo, tmp_path, ask, build=lambda command: (True, "собрано"))
+    # A declined patch can reach validation; exhausted apply corrections now pause earlier.
+    ask = FakeAsk(PLAN, PATCH, PATCH, REVIEW_ISSUE)
+    def prepare(index,text):
+        return (_apply_without_checks(repo,index,text) if index==1 else
+                TaskPatch(index,text,'',False,'подтверждение отклонено'))
+    pipeline = _pipeline(repo, tmp_path, ask, prepare=prepare,build=lambda command: (True, "собрано"))
     _approved(pipeline)
     _to_validation(pipeline)
 
@@ -444,21 +446,23 @@ def test_validation_ignores_unrelated_user_work_and_sees_check_results(repo, tmp
 
 def test_subagents_review_before_confirmation_with_isolated_context(repo, tmp_path):
     calls, approvals = [], []
-    patch = task_pipeline.parse_patch_response(PATCH)
+    (repo/'notes.cpp').write_text('первая строка\nвторая строка\nACTUAL_SOURCE_MARKER\n')
+    patch = task_pipeline.parse_patch_response(PATCH.replace('notes.txt','notes.cpp'))
     def ask(messages, words, phase):
         calls.append((phase, messages))
         if phase == 'task_plan':
-            content = '{"items":["update notes"]}'
+            content = '{"items":["update notes.cpp"]}'
         elif phase == 'task_execute':
             content = 'PRIVATE_BUILDER_REASONING\n' + patch
         else:
             assert phase == 'task_review'
-            assert (repo / 'notes.txt').read_text() == 'первая строка\nвторая строка\n'
+            assert (repo / 'notes.cpp').read_text() == 'первая строка\nвторая строка\nACTUAL_SOURCE_MARKER\n'
             assert not approvals
             context = '\n'.join(m['content'] for m in messages)
             assert 'PRIVATE_BUILDER_REASONING' not in context
             assert patch.strip() in context
             assert 'первая строка' in context
+            assert 'ACTUAL_SOURCE_MARKER' in context
             content = '{"issues":[]}'
         return AnswerMeta(content, 'test', .01, 10, 10, 20, 0)
     pipeline = _pipeline(repo, tmp_path, ask)
@@ -468,6 +472,9 @@ def test_subagents_review_before_confirmation_with_isolated_context(repo, tmp_pa
     assert [phase for phase, _ in calls] == ['task_plan', 'task_execute', 'task_review']
     assert approvals == ['confirmed']
     assert pipeline.state.current.patches[0].applied
+    source_note=next(line for line in pipeline.state.current.patches[0].review_notes
+                     if line.startswith('Источники разработчика: '))
+    assert json.loads(source_note.removeprefix('Источники разработчика: '))==['notes.cpp']
     assert any('ревьюер' in note.lower() for note in report.notes)
 
 
@@ -548,6 +555,47 @@ def test_deterministic_rejection_precedes_subagent_review(repo, tmp_path):
     pipeline.step()
     assert not pipeline.state.current.patches[0].applied
     assert 'task_review' not in [phase for phase, *_ in ask.calls]
+
+
+def test_invalid_apply_context_has_one_correction_before_review(repo,tmp_path):
+    invalid=PATCH.replace(' вторая строка',' отсутствующий контекст')
+    ask=FakeAsk(PLAN,invalid,PATCH)
+    pipeline=_pipeline(repo,tmp_path,ask)
+    _approved(pipeline);pipeline.step()
+    phases=[phase for phase,*_ in ask.calls]
+    assert phases==['task_plan','task_execute','task_execute','task_review']
+    assert pipeline.state.current.patches[-1].applied
+    assert 'третья строка' in (repo/'notes.txt').read_text()
+    assert any('отклонён проверками' in line for line in pipeline.state.current.patches[-1].review_notes)
+
+
+def test_invalid_apply_context_is_not_retried_forever(repo,tmp_path):
+    invalid=PATCH.replace(' вторая строка',' отсутствующий контекст')
+    ask=FakeAsk(PLAN,invalid,invalid)
+    approvals=[]
+    pipeline=_pipeline(repo,tmp_path,ask)
+    pipeline._confirm=lambda *_: approvals.append(True) or True
+    _approved(pipeline);pipeline.step()
+    assert [phase for phase,*_ in ask.calls].count('task_execute')==2
+    assert not approvals and not pipeline.state.current.patches[-1].applied
+    assert pipeline.state.paused
+    assert 'третья строка' not in (repo/'notes.txt').read_text()
+
+
+def test_apply_correction_api_failure_preserves_rejection_and_pauses(repo,tmp_path):
+    invalid=PATCH.replace(' вторая строка',' отсутствующий контекст')
+    class Ask(FakeAsk):
+        def __call__(self,messages,words,phase):
+            if phase=='task_execute' and any(p=='task_execute' for p,*_ in self.calls):
+                assert TaskStore(tmp_path/'task.json').load().current.patches[-1].review_pending
+                raise APIError('private provider error')
+            return super().__call__(messages,words,phase)
+    pipeline=_pipeline(repo,tmp_path,Ask(PLAN,invalid))
+    _approved(pipeline);pipeline.step()
+    patch=pipeline.state.current.patches[-1]
+    assert not patch.applied and pipeline.state.paused
+    assert 'недоступен' in patch.reason and 'применение' in patch.reason
+    assert 'private provider error' not in str(patch)
 
 
 def test_review_api_failure_is_recorded_without_confirmation(repo, tmp_path):

@@ -1170,7 +1170,7 @@ class AssistantSession:
         meta = client.ask_with_usage_messages(
             messages,
             max_tokens=config.max_tokens_for_words(max_words),
-            temperature=None,
+            temperature=self.settings.temperature,
             model=self._agent.model,
             **options,
         )
