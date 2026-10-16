@@ -304,14 +304,19 @@ def test_metadata_identity_mismatch_is_blocker(project, tmp_path):
     assert 'не совпадают' in next(c['reason'] for c in report['checks'] if c['id'] == 'metadata')
 
 
-def test_real_build_adapter_applies_target_locally_and_preserves_logs(project, tmp_path, monkeypatch):
+@pytest.mark.parametrize('shadow', [False, True])
+def test_real_build_adapter_applies_target_locally_and_preserves_logs(project, tmp_path, monkeypatch, shadow):
     from core import release_preparation as release
     root, _, _, domain = project
     tool = tmp_path / 'sdk'
     tool.touch()
     tool.chmod(0o700)
     monkeypatch.setenv(domain.ops.tool_env, str(tool))
-    target = domain.ops.target_pattern.replace('*', '1').replace('{arch}', domain.ops.default_architecture)
+    if shadow:
+        domain.release.target_pattern = domain.ops.target_pattern.removesuffix('.default')
+        domain.release.build_command = ('build', '{project}')
+    pattern = getattr(domain.release, 'target_pattern', '') or domain.ops.target_pattern
+    target = pattern.replace('*', '1').replace('{arch}', domain.ops.default_architecture)
     calls = []
     def runner(argv, cwd, timeout):
         calls.append((argv[1:], cwd))
@@ -319,7 +324,7 @@ def test_real_build_adapter_applies_target_locally_and_preserves_logs(project, t
             return 0, target, .1
         if argv[1:] == ['--version']:
             return 0, 'SDK_RELEASE=1', .1
-        if argv[1:] == ['build']:
+        if argv[1:2] == ['build']:
             package = cwd / 'RPMS' / 'out.rpm'
             package.parent.mkdir()
             package.write_bytes(b'package')
@@ -331,9 +336,26 @@ def test_real_build_adapter_applies_target_locally_and_preserves_logs(project, t
     assert configuration == [(['config', 'target=' + target], root / ('build_' + domain.ops.default_architecture))]
     assert 'real command output' in result['log']
     assert target in result['log']
+    assert any(args == (['build', str(root)] if shadow else ['build']) for args, _ in calls)
 
 
-@pytest.mark.parametrize('damage', ['reason', 'data', 'error', 'usage', 'cost', 'source'])
+def test_sdk_timeout_names_limit_and_keeps_partial_output(project, tmp_path, monkeypatch):
+    from core import release_preparation as release
+    root, _, _, domain = project
+    tool = tmp_path / 'sdk'
+    tool.touch()
+    tool.chmod(0o700)
+    monkeypatch.setenv(domain.ops.tool_env, str(tool))
+    def timeout(argv, cwd, limit):
+        raise subprocess.TimeoutExpired(argv, limit, output=b'engine did not respond')
+    monkeypatch.setattr(release, '_run', timeout)
+    result = release._build(root, domain, domain.ops.default_architecture)
+    assert result['status'] == 'unavailable'
+    assert '60' in result['reason']
+    assert 'engine did not respond' in result['log']
+
+
+@pytest.mark.parametrize('damage', ['reason', 'data', 'error', 'usage', 'cost', 'source', 'huge_metric'])
 def test_corrupt_saved_render_fields_are_rejected(project, tmp_path, damage):
     from core.release_preparation import load_status
     report = run(project, tmp_path)
@@ -348,6 +370,8 @@ def test_corrupt_saved_render_fields_are_rejected(project, tmp_path, damage):
         report['ai']['release_review']['usage']['total_tokens'] = float('nan')
     elif damage == 'cost':
         report['ai']['release_review']['usage']['cost_usd'] = 'broken'
+    elif damage == 'huge_metric':
+        report['ai']['release_review']['usage']['total_tokens'] = 10 ** 400
     else:
         report['sources'][0]['sha'] = 123
     path.write_text(json.dumps(report))

@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from . import pr_review
 from .aurora_ops import AuroraOps
@@ -126,7 +126,12 @@ def _build(copy, domain, architecture):
         code, output, seconds = _run(argv, cwd, timeout)
         logs.append(output)
         return code, output, seconds
-    executor = AuroraOps(copy, domain.ops, run=recorded)
+    command = getattr(domain.release, 'build_command', ())
+    ops = replace(domain.ops,
+        target_pattern=getattr(domain.release, 'target_pattern', '') or domain.ops.target_pattern,
+        steps=tuple((name, command if name == 'build' and command else argv)
+                    for name, argv in domain.ops.steps))
+    executor = AuroraOps(copy, ops, run=recorded)
     try:
         selected = executor.select_target(architecture)
         if not selected.ok:
@@ -143,12 +148,17 @@ def _build(copy, domain, architecture):
         if not configured.ok:
             return {'status': 'unavailable', 'reason': 'Не удалось настроить выбранную цель сборки.', 'log': '\n'.join(logs)}
         built = executor.build()
+    except subprocess.TimeoutExpired as exc:
+        for output in (exc.stdout, exc.stderr):
+            if output:
+                logs.append(output.decode('utf-8', errors='replace') if isinstance(output, bytes) else output)
+        return {'status': 'unavailable', 'reason': f'Команда SDK превысила время ожидания ({exc.timeout} с).', 'log': '\n'.join(logs)}
     except (OSError, subprocess.SubprocessError):
-        return {'status': 'unavailable', 'reason': 'Инструмент сборки недоступен или превысил время ожидания.', 'log': '\n'.join(logs)}
+        return {'status': 'unavailable', 'reason': 'Инструмент сборки недоступен.', 'log': '\n'.join(logs)}
     unavailable = any(re.search(pattern, '\n'.join(logs)) for pattern in
                       (domain.checks.build_unavailable_patterns if hasattr(domain.checks, 'build_unavailable_patterns') else ()))
-    return {'status': 'passed' if built.ok else 'failed' if built.failed else 'unavailable',
-            **({'status': 'unavailable'} if unavailable and not built.ok else {}),
+    status = 'passed' if built.ok else 'unavailable' if unavailable or not built.failed else 'failed'
+    return {'status': status,
             'reason': 'Окружение сборки недоступно; см. журнал.' if unavailable else built.reason,
             'log': '\n'.join(logs),
             'package': built.path if built.ok else None, 'target': executor.state.target}
@@ -549,7 +559,7 @@ def load_status(output_root: Path):
             usage = stage.get('usage', {})
             if not isinstance(usage, dict): return None
             def number(value):
-                return type(value) in (int, float) and math.isfinite(value) and value >= 0
+                return type(value) in (int, float) and 0 <= value <= 10 ** 15 and math.isfinite(value)
             if not number(usage.get('total_tokens', 0)):
                 return None
             if usage.get('cost_usd') is not None and not number(usage['cost_usd']): return None

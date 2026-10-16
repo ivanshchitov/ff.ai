@@ -296,6 +296,8 @@ class DomainRelease:
     build_required: bool = True
     tests_required: bool = False
     test_command: Tuple[str, ...] = ()
+    target_pattern: str = ""
+    build_command: Tuple[str, ...] = ()
 
 
 def _load_release(path: Path) -> Optional[DomainRelease]:
@@ -325,12 +327,18 @@ def _load_release(path: Path) -> Optional[DomainRelease]:
         except re.error as error:
             fail(field, f"неверный образец ({error})")
 
-    keys(data, {"schema", "metadata", "build_required", "tests_required", "test_command"}, "release")
+    keys(data, {"schema", "metadata", "build_required", "tests_required", "test_command",
+                "target_pattern", "build_command"}, "release")
     if type(data.get("schema")) is not int or data["schema"] != SCHEMA_VERSION:
         fail("schema", f"ожидается версия {SCHEMA_VERSION}")
     for field in ("build_required", "tests_required"):
         if field in data and type(data[field]) is not bool:
             fail(field, "ожидается логическое значение")
+    if "target_pattern" in data:
+        target_pattern = data["target_pattern"]
+        if (not isinstance(target_pattern, str) or not target_pattern.strip()
+                or "{arch}" not in target_pattern or "\x00" in target_pattern):
+            fail("target_pattern", "ожидается непустая строка с {arch}")
     raw = data.get("metadata")
     if not isinstance(raw, list) or not raw:
         fail("metadata", "ожидается непустой список")
@@ -361,6 +369,8 @@ def _load_release(path: Path) -> Optional[DomainRelease]:
         build_required=data.get("build_required", True),
         tests_required=data.get("tests_required", False),
         test_command=strings(data.get("test_command", []), "test_command"),
+        target_pattern=data.get("target_pattern", ""),
+        build_command=strings(data.get("build_command", []), "build_command"),
     )
 
 

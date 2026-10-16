@@ -29,6 +29,8 @@
     }
   ],
   "build_required": true,
+  "target_pattern": "AuroraOS-*-{arch}",
+  "build_command": ["build", "{project}"],
   "tests_required": false,
   "test_command": []
 }

@@ -34,16 +34,21 @@ def test_release_policy_loads_defaults_and_trusted_test_argv(tmp_path):
     assert release.build_required is True
     assert release.tests_required is False
     assert release.test_command == ()
+    assert release.target_pattern == ""
+    assert release.build_command == ()
     assert release.metadata[0].glob == "package/*.meta"
     assert release.metadata[0].required == (r"(?m)^Version: \S+",)
     assert release.metadata[0].identity_pattern == r"(?m)^Name: (\S+)"
     data = dict(POLICY, build_required=False, tests_required=True,
-                test_command=["./run-tests", "--verbose"])
+                test_command=["./run-tests", "--verbose"],
+                target_pattern="Probe-*-{arch}", build_command=["build", "{project}"])
     _write(tmp_path, data)
     release = load_domain("probe", tmp_path).release
     assert release.build_required is False
     assert release.tests_required is True
     assert release.test_command == ("./run-tests", "--verbose")
+    assert release.target_pattern == "Probe-*-{arch}"
+    assert release.build_command == ("build", "{project}")
 
 
 @pytest.mark.parametrize("update", [
@@ -51,6 +56,11 @@ def test_release_policy_loads_defaults_and_trusted_test_argv(tmp_path):
     {"unknown": 1}, {"build_required": 1}, {"tests_required": "yes"},
     {"test_command": "pytest"}, {"test_command": [1]}, {"test_command": [""]},
     {"test_command": ["run\x00tests"]}, {"metadata": {}}, {"metadata": []},
+    {"target_pattern": None}, {"target_pattern": 1}, {"target_pattern": []},
+    {"target_pattern": ""}, {"target_pattern": " "},
+    {"target_pattern": "Probe-*"}, {"target_pattern": "Probe-{arch}\x00"},
+    {"build_command": "build"}, {"build_command": None}, {"build_command": [1]},
+    {"build_command": [""]}, {"build_command": [" "]}, {"build_command": ["b\x00uild"]},
     {"metadata": [1]}, {"metadata": [{"glob": "*.meta", "required": [], "extra": 1}]},
     {"metadata": [{"glob": "../*.meta", "required": []}]},
     {"metadata": [{"glob": "/tmp/*.meta", "required": []}]},
@@ -82,10 +92,17 @@ def test_release_schema_is_required(tmp_path):
         load_domain("probe", tmp_path)
 
 
+def test_release_policy_accepts_explicit_empty_build_override(tmp_path):
+    _write(tmp_path, dict(POLICY, build_command=[]))
+    assert load_domain("probe", tmp_path).release.build_command == ()
+
+
 def test_bundled_release_policy_checks_complete_metadata():
     release = load_domain("aurora-qt5").release
     assert release.build_required and not release.tests_required
     assert release.test_command == ()
+    assert release.target_pattern == "AuroraOS-*-{arch}"
+    assert release.build_command == ("build", "{project}")
     samples = {
         "rpm/org.example.App.spec": "Name: org.example.App\nVersion: 1.0\nRelease: 1\nLicense: MIT\nBuildRequires: pkgconfig(test)\n",
         "app/org.example.App.desktop": "[Desktop Entry]\nType=Application\nName=Example\nExec=/usr/bin/org.example.App\nIcon=org.example.App\n[X-Application]\nPermissions=UserDirs\nOrganizationName=org.example\nApplicationName=App\n",
