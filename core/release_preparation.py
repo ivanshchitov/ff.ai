@@ -24,6 +24,9 @@ class ReleaseError(Exception):
     """Safe user-facing failure, without subprocess or model payloads."""
 
 
+BUILD_TIMEOUT_SECONDS = 180
+
+
 def _git(root, *args):
     try:
         return pr_review._git(root, *args)
@@ -123,7 +126,7 @@ def _build(copy, domain, architecture):
     logs = []
     def recorded(argv, cwd, timeout):
         logs.append('> ' + ' '.join(argv))
-        code, output, seconds = _run(argv, cwd, timeout)
+        code, output, seconds = _run(argv, cwd, min(timeout, BUILD_TIMEOUT_SECONDS))
         logs.append(output)
         return code, output, seconds
     command = getattr(domain.release, 'build_command', ())

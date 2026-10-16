@@ -102,7 +102,7 @@ def test_bundled_release_policy_checks_complete_metadata():
     assert release.build_required and not release.tests_required
     assert release.test_command == ()
     assert release.target_pattern == "AuroraOS-*-{arch}"
-    assert release.build_command == ("build", "{project}")
+    assert release.build_command == ("-c", "no-pull-build-requires", "build", "{project}")
     samples = {
         "rpm/org.example.App.spec": "Name: org.example.App\nVersion: 1.0\nRelease: 1\nLicense: MIT\nBuildRequires: pkgconfig(test)\n",
         "app/org.example.App.desktop": "[Desktop Entry]\nType=Application\nName=Example\nExec=/usr/bin/org.example.App\nIcon=org.example.App\n[X-Application]\nPermissions=UserDirs\nOrganizationName=org.example\nApplicationName=App\n",

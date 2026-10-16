@@ -325,6 +325,7 @@ def test_real_build_adapter_applies_target_locally_and_preserves_logs(project, t
         if argv[1:] == ['--version']:
             return 0, 'SDK_RELEASE=1', .1
         if argv[1:2] == ['build']:
+            assert timeout == 180
             package = cwd / 'RPMS' / 'out.rpm'
             package.parent.mkdir()
             package.write_bytes(b'package')

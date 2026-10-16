@@ -52,8 +52,6 @@ def _launch(tmp_path: pathlib.Path, cache: pathlib.Path) -> AppSession:
         repo=repo,
         api_key=None,
         api_url=None,
-        mcp_command="",
-        mcp_args="",
     )
 
 
