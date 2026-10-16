@@ -279,6 +279,91 @@ class DomainSupport:
     tool: str
 
 
+@dataclass(frozen=True)
+class ReleaseMetadata:
+    """Полные файлы метаданных и образцы обязательных элементов."""
+
+    glob: str
+    required: Tuple[str, ...]
+    identity_pattern: str = ""
+
+
+@dataclass(frozen=True)
+class DomainRelease:
+    """Правила подготовки релиза; команды поступают из доверенного пакета домена."""
+
+    metadata: Tuple[ReleaseMetadata, ...]
+    build_required: bool = True
+    tests_required: bool = False
+    test_command: Tuple[str, ...] = ()
+
+
+def _load_release(path: Path) -> Optional[DomainRelease]:
+    if not path.is_file():
+        return None
+    data = _read_json(path)
+
+    def fail(field: str, reason: str) -> None:
+        raise DomainSchemaError(f"{path}: поле «{field}» — {reason}")
+
+    def keys(value: dict, allowed: set, field: str) -> None:
+        unknown = set(value) - allowed
+        if unknown:
+            fail(field, "неизвестные поля: " + ", ".join(sorted(unknown)))
+
+    def strings(value: object, field: str) -> Tuple[str, ...]:
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or not item.strip() or "\x00" in item
+            for item in value
+        ):
+            fail(field, "ожидается список непустых строк")
+        return tuple(value)
+
+    def pattern(value: str, field: str) -> re.Pattern:
+        try:
+            return re.compile(value)
+        except re.error as error:
+            fail(field, f"неверный образец ({error})")
+
+    keys(data, {"schema", "metadata", "build_required", "tests_required", "test_command"}, "release")
+    if type(data.get("schema")) is not int or data["schema"] != SCHEMA_VERSION:
+        fail("schema", f"ожидается версия {SCHEMA_VERSION}")
+    for field in ("build_required", "tests_required"):
+        if field in data and type(data[field]) is not bool:
+            fail(field, "ожидается логическое значение")
+    raw = data.get("metadata")
+    if not isinstance(raw, list) or not raw:
+        fail("metadata", "ожидается непустой список")
+    metadata = []
+    for index, item in enumerate(raw):
+        field = f"metadata[{index}]"
+        if not isinstance(item, dict):
+            fail(field, "ожидается объект")
+        keys(item, {"glob", "required", "identity_pattern"}, field)
+        glob = item.get("glob")
+        if (
+            not isinstance(glob, str) or not glob.strip()
+            or Path(glob).is_absolute() or "\\" in glob or ":" in glob or "\x00" in glob
+            or any(part in ("", ".", "..") for part in glob.split("/"))
+        ):
+            fail(f"{field}.glob", "ожидается относительная маска внутри проекта")
+        required = strings(item.get("required"), f"{field}.required")
+        for value in required:
+            pattern(value, f"{field}.required")
+        identity = item.get("identity_pattern", "")
+        if not isinstance(identity, str):
+            fail(f"{field}.identity_pattern", "ожидается строка")
+        if identity and pattern(identity, f"{field}.identity_pattern").groups < 1:
+            fail(f"{field}.identity_pattern", "нужна группа захвата идентификатора")
+        metadata.append(ReleaseMetadata(glob, required, identity))
+    return DomainRelease(
+        metadata=tuple(metadata),
+        build_required=data.get("build_required", True),
+        tests_required=data.get("tests_required", False),
+        test_command=strings(data.get("test_command", []), "test_command"),
+    )
+
+
 def _load_support(path: Path) -> Optional[DomainSupport]:
     if not path.is_file():
         return None
@@ -321,6 +406,7 @@ class Domain:
     # Разделы профиля пользователя и вопрос об имени (P8).
     profile: Optional[DomainProfile] = None
     support: Optional[DomainSupport] = None
+    release: Optional[DomainRelease] = None
 
     @lru_cache(maxsize=None)
     def prompt(self, name: str) -> str:
@@ -793,6 +879,7 @@ def load_domain(domain_id: str, domains_dir: Optional[Path] = None) -> Domain:
         memory=_load_memory(path / "memory.json"),
         profile=_load_profile(path / "profile.json"),
         support=_load_support(path / "support.json"),
+        release=_load_release(path / "release.json"),
     )
     # Промпты обязательны: без них домен не сможет ни отвечать, ни отказать.
     domain.prompt("system")
