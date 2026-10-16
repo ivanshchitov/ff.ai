@@ -157,7 +157,10 @@ class DevAssistantTUI:
         if command == "/branches":
             self._open_branches_screen()
             return
-        if command in ("/help", "/support"):
+        if command == '/release' and len(line.split()) > 1 and line.split()[1] == 'prepare':
+            result = self._ask_with_spinner(line, command=True)
+            self._print_journal()
+        elif command in ("/help", "/support"):
             if command == "/help" and not self._ensure_api_key():
                 return
             try:
