@@ -24,6 +24,7 @@ cd /path/to/aurora-project            # целевой репозиторий п
 | Четыре стратегии контекста | `/settings` → «Стратегия контекста»: резюме, окно, факты, ветки |
 | История между запусками | `/exit`, запустите снова — контекст подхватится, экран сообщит, сколько обменов восстановлено |
 | Поддержка пользователей | домен `product-support`, `/support <ticket-id> <вопрос>`: FAQ/docs через RAG, выбранный тикет и пользователь через MCP |
+| Подготовка релиза | `/release prepare --base <ref> --head HEAD [--arch <architecture>]`: проверки и сборка отдельного снимка, AI-ревью, черновик release notes; `/release status` читает последний результат без модели |
 | Домен как данные | `/domain` покажет пакет, версии платформы и документации, найденные маркеры |
 | Отчёты без обращений к модели | `/usage`, `/context`, `/domain`, `/commands` |
 | Форматы ответа | `/settings` → «Формат ответа»: свободный, компактный, json, дифф |
@@ -46,7 +47,7 @@ cd /path/to/aurora-project            # целевой репозиторий п
 | Ответ по исходникам | поиск по индексу перед вопросом: в запрос уходят фрагменты с путём и строками, ответ обязан назвать файл и привести дословную цитату; `/rag-code retrieval baseline\|enhanced`, `/rag-code threshold <0..1>`, `/rag-code tune before=<n> after=<n>`, `/rag-code mode on\|off`, `/rag-code trace` |
 
 Команды: `/commands`, `/settings`, `/models`, `/clear`, `/usage`, `/context`, `/branches`,
-`/domain`, `/rag-docs`, `/rag-code`, `/mcp`, `/tool`, `/task`, `/ops`, `/memory`, `/profile`,
+`/domain`, `/rag-docs`, `/rag-code`, `/mcp`, `/tool`, `/task`, `/ops`, `/release`, `/memory`, `/profile`,
 `/invariants`, `/schedule`, `/exit` (автодополнение по Tab).
 
 Флаги: `--repo <путь>` (по умолчанию текущий каталог), `--domain <id>`,
@@ -80,6 +81,7 @@ pytest -m network          # проверки против реального п
 | [`docs/design.md`](docs/design.md) | Архитектура: фасад сессии, целевой репозиторий, домен как данные, корпуса и цитаты, инварианты, безопасность инструментов |
 | [`docs/domains.md`](docs/domains.md) | Домены как данные: схема пакета, выбор домена, чек-лист расширения |
 | [`docs/domain-aurora-qt5.md`](docs/domain-aurora-qt5.md) | Домен «ОС Аврора + Qt 5.6»: локальная среда, источники, инварианты, инструменты, проверки, сценарии |
+| [`docs/day35-release-preparation.md`](docs/day35-release-preparation.md) | Подготовка релиза: роль AI, проверяемые статусы, отдельная сборочная копия и демонстрация на WebDavClient |
 | [`docs/roadmap.md`](docs/roadmap.md) | Фазы P0–P12: объём, критерии приёмки, демонстрация, риски |
 | [`AGENTS.md`](AGENTS.md) | Контекст для ИИ-агентов: правила репозитория, процесс, грабли |
 | `openspec/` | Спецификации и активные изменения (OpenSpec, schema `spec-driven`) |
@@ -99,6 +101,7 @@ core/               # агент и вся логика без терминал�
   prompts.py          сборка запроса: роль домена, формат ответа, объём и лимит списка
   agent.py            лог диалога, память стратегии, сжатие, расход сессии
   session.py          фасад для интерфейсов: операции, события, снимки-отчёты
+  release_preparation.py  подготовка релиза по точным SHA, проверки и два AI-этапа
   api_client.py       облачный клиент: повторы, метрики, оценка стоимости
   context_strategies.py, context_compressor.py, history_manager.py, usage.py, answer_settings.py
 mcp_server/         # собственный сервер репозитория: отдельный процесс по stdio
